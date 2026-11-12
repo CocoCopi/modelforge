@@ -7,6 +7,7 @@ import com.modelforge.app.core.ArchitectureRegistry
 import com.modelforge.app.core.ConfigDeriver
 import com.modelforge.app.core.HardwareDetector
 import com.modelforge.app.core.ModelConfig
+import com.modelforge.app.core.ResponseModes
 import com.modelforge.app.data.DatasetMixEntry
 import com.modelforge.app.data.ModelManifest
 import com.modelforge.app.data.ModelStore
@@ -96,10 +97,14 @@ data class PlaygroundState(
     val topP: Float = 0.95f,
     val mode: String = "checkpoint",
     val bits: Int = 4,
+    val speedMode: String = ResponseModes.NORMAL,
+    val reasoningEnabled: Boolean = false,
+    val thinkingExpanded: Boolean = false,
     val output: String = "",
     val busy: Boolean = false,
     val status: String = "",
     val tokensPerSec: Double = 0.0,
+    val latencyMs: Long = 0L,
     val generatedTokens: Int = 0,
     val exportedBytes: Long = 0L,
     val error: String? = null
@@ -627,7 +632,12 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     fun openPlayground(id: String) {
         val manifest = store.loadManifest(id) ?: return
         val bits = manifest.config.bits.takeIf { it in 2..8 } ?: 4
-        _playground.value = PlaygroundState(modelId = id, bits = bits)
+        _playground.value = PlaygroundState(
+            modelId = id,
+            bits = bits,
+            speedMode = ResponseModes.normalize(manifest.behavior.speedMode),
+            reasoningEnabled = manifest.behavior.reasoningEnabled
+        )
         _screen.value = Screen.Playground(id)
     }
 
@@ -665,6 +675,18 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         _playground.update { it.copy(bits = bits, exportedBytes = 0L, error = null) }
     }
 
+    fun updatePlaygroundSpeed(mode: String) {
+        _playground.update { it.copy(speedMode = ResponseModes.normalize(mode), error = null) }
+    }
+
+    fun updatePlaygroundReasoning(enabled: Boolean) {
+        _playground.update { it.copy(reasoningEnabled = enabled, thinkingExpanded = enabled) }
+    }
+
+    fun togglePlaygroundThinking() {
+        _playground.update { it.copy(thinkingExpanded = !it.thinkingExpanded) }
+    }
+
     fun generatePlayground() {
         val state = _playground.value
         if (state.busy || state.modelId.isBlank()) return
@@ -694,12 +716,18 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             _playground.update { it.copy(busy = true, status = "Generating…", error = null) }
             try {
                 val tokenizer = BpeTokenizer.load(tokenizerFile)
-                val encoded = tokenizer.encode(state.prompt)
+                val promptText = ResponseModes.prompt(
+                    state.prompt,
+                    state.reasoningEnabled,
+                    state.speedMode
+                )
+                val encoded = tokenizer.encode(promptText)
                 val prompt = if (encoded.isEmpty()) tokenizer.encode(" ") else encoded
-                val maxNew = state.maxNew.coerceIn(1, 512)
+                val maxNew = ResponseModes.maxNewTokens(state.maxNew, state.speedMode)
                 var text = ""
                 var tokens = 0
                 var perSecond = 0.0
+                var latency = 0L
                 if (state.mode == PlaygroundState.MODE_PACKED) {
                     val model = PackedModel.load(packed.absolutePath)
                         ?: throw IllegalStateException("Could not load the packed file. Export it again.")
@@ -710,10 +738,12 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                         val generated = model.generate(
                             trimmed, maxNew, state.temperature, state.topK, state.topP, System.nanoTime()
                         )
-                        val seconds = (System.nanoTime() - started) / 1_000_000_000.0
-                        text = tokenizer.decode(trimmed + generated)
+                        val elapsed = System.nanoTime() - started
+                        val seconds = elapsed / 1_000_000_000.0
+                        text = tokenizer.decode(generated)
                         tokens = generated.size
                         perSecond = if (seconds > 0.0) generated.size / seconds else 0.0
+                        latency = elapsed / 1_000_000L
                     } finally {
                         model.close()
                     }
@@ -727,10 +757,12 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                         val generated = model.generate(
                             trimmed, maxNew, state.temperature, state.topK, state.topP, System.nanoTime()
                         )
-                        val seconds = (System.nanoTime() - started) / 1_000_000_000.0
-                        text = tokenizer.decode(trimmed + generated)
+                        val elapsed = System.nanoTime() - started
+                        val seconds = elapsed / 1_000_000_000.0
+                        text = tokenizer.decode(generated)
                         tokens = generated.size
                         perSecond = if (seconds > 0.0) generated.size / seconds else 0.0
+                        latency = elapsed / 1_000_000L
                     } finally {
                         model.close()
                     }
@@ -741,7 +773,8 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                         status = "",
                         output = text,
                         generatedTokens = tokens,
-                        tokensPerSec = perSecond
+                        tokensPerSec = perSecond,
+                        latencyMs = latency
                     )
                 }
             } catch (t: Throwable) {

@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import com.modelforge.app.core.ResponseModes
 import java.io.File
 import com.modelforge.app.ui.design.ForgeButton
 import com.modelforge.app.ui.design.ForgeOutlineButton
@@ -140,6 +141,59 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
                 }
             }
 
+            SectionCard("Response") {
+                Text(
+                    "Response speed changes the inference budget, not the weights.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ForgeColors.inkMuted
+                )
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        ResponseModes.INSTANT,
+                        ResponseModes.NORMAL,
+                        ResponseModes.EXTRA
+                    ).forEach { mode ->
+                        Choice(
+                            text = ResponseModes.label(mode),
+                            selected = state.speedMode == mode,
+                            onClick = { vm.updatePlaygroundSpeed(mode) }
+                        )
+                    }
+                }
+                InfoRow("Token budget", ResponseModes.maxNewTokens(state.maxNew, state.speedMode).toString())
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Choice(
+                        text = "Reasoning on",
+                        selected = state.reasoningEnabled,
+                        onClick = { vm.updatePlaygroundReasoning(true) }
+                    )
+                    Choice(
+                        text = "Reasoning off",
+                        selected = !state.reasoningEnabled,
+                        onClick = { vm.updatePlaygroundReasoning(false) }
+                    )
+                }
+                if (state.reasoningEnabled && state.speedMode == ResponseModes.INSTANT) {
+                    Text(
+                        "Instant skips thinking even when reasoning is enabled.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ForgeColors.ochreInk
+                    )
+                }
+                if (state.reasoningEnabled && manifest.config.paramCount() < 50_000_000L) {
+                    Text(
+                        "Below about 50M parameters, reasoning tends to be shallow. " +
+                            "Treat the thinking text as a scratchpad, not proof of work.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ForgeColors.ochreInk
+                    )
+                }
+                InfoRow("Measured speed", "shown after each run", ForgeColors.inkMuted)
+            }
+
             SectionCard("Prompt") {
                 OutlinedTextField(
                     value = state.prompt,
@@ -217,14 +271,34 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
             }
 
             if (state.output.isNotBlank()) {
+                val split = remember(state.output) { ResponseModes.splitThinking(state.output) }
                 SectionCard("Output") {
+                    if (split.thinking != null) {
+                        ForgeOutlineButton(
+                            if (state.thinkingExpanded) "Hide reasoning" else "Show reasoning",
+                            onClick = vm::togglePlaygroundThinking,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        if (state.thinkingExpanded) {
+                            Text(
+                                split.thinking,
+                                style = ForgeType.mono,
+                                color = ForgeColors.inkMuted,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(ForgeColors.inkWash)
+                                    .padding(12.dp)
+                            )
+                        }
+                    }
                     SelectionContainer {
                         Text(
-                            state.output,
+                            split.answer.ifBlank { state.output },
                             style = ForgeType.mono
                         )
                     }
                     InfoRow("Generated tokens", state.generatedTokens.toString())
+                    InfoRow("Latency", "${state.latencyMs} ms")
                     InfoRow("Speed", formatTokensPerSecond(state.tokensPerSec), ForgeColors.emberText)
                     Text(
                         "These models are trained from scratch on a phone. Repeating phrases " +
