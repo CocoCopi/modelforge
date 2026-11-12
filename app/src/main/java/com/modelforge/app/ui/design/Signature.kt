@@ -48,6 +48,7 @@ import com.modelforge.app.ui.theme.ForgeType
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.ln
+import kotlin.math.pow
 import kotlin.math.roundToLong
 
 val NotebookShape = RoundedCornerShape(6.dp)
