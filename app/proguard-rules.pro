@@ -36,3 +36,6 @@
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
 -dontwarn okhttp3.internal.platform.**
+
+# Tink references Error Prone annotations that are compile-time only.
+-dontwarn com.google.errorprone.annotations.**
