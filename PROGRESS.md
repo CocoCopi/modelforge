@@ -14,7 +14,7 @@ state of the CI run. Only measured facts belong here.
 
 ## Phase 1 - skeleton, CI, hardware detection, config derivation
 
-Status: in progress
+Status: DONE - CI run 43147652432 green (unit tests + host native tests + debug APK artifact).
 
 - Gradle project with AGP 8.5.2, Kotlin 1.9.24, Compose BOM 2024.06.00,
   compileSdk 34, minSdk 26, arm64-v8a only.
@@ -28,5 +28,9 @@ Status: in progress
   parameters with the same formula as C++, ranks sensible shapes, targets
   within 5% for 1M, 10M and 50M (unit tested).
 - Native scaffold: host-buildable C++ config + test, JNI library target.
+
+CI fixes made during this phase: the removed `tools` SDK package was no longer
+installable (setup-android now only installs `platform-tools`), and
+kotlinx.serialization 1.7.1 was downgraded to 1.6.3 because it requires Kotlin 2.0.
 
 Nothing in this phase claims to train or generate text yet.
