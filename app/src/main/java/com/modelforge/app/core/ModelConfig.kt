@@ -17,7 +17,8 @@ data class ModelConfig(
     val tiedEmbeddings: Boolean = true,
     val targetParams: Long = 0L,
     val bits: Int = 32,
-    val qat: Boolean = false
+    val qat: Boolean = false,
+    val architectureId: String = ArchitectureRegistry.GPT_TEXT
 ) {
     val headDim: Int get() = if (heads > 0) dModel / heads else 0
     val paramsPerHead: Int get() = headDim
