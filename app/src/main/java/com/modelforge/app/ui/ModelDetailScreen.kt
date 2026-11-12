@@ -156,7 +156,7 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
                     modifier = Modifier.fillMaxWidth(),
                     primary = true
                 )
-                if (checkpoints.second == 0) {
+                if (checkpoints.second == 0L) {
                     Text(
                         "Train this model first; there is no best checkpoint to test.",
                         style = MaterialTheme.typography.bodySmall,
