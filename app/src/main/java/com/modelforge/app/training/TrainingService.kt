@@ -238,11 +238,17 @@ class TrainingService : Service() {
             }
 
             val dataDir = store.dataDir(modelId)
+            val corpusCap = settings.corpusChars.coerceIn(10_000, 4_000_000)
+            val identityBudget = if (manifest.creator.isNotBlank()) {
+                IdentityDataGenerator.estimateIdentityFraction(corpusCap)
+            } else {
+                0
+            }
             val corpus = withContext(Dispatchers.IO) {
                 DatasetMixer.buildWeightedCorpus(
                     manifest.datasets,
                     dataDir,
-                    settings.corpusChars.coerceIn(10_000, 4_000_000)
+                    (corpusCap - identityBudget - 2).coerceAtLeast(8_000)
                 )
             }
             if (corpus.text.isBlank()) {
@@ -251,18 +257,34 @@ class TrainingService : Service() {
                     "Re-open Step 3 and download the dataset again."
                 )
             }
+            val identity = if (identityBudget > 0) {
+                IdentityDataGenerator.generate(
+                    name = manifest.name,
+                    creator = manifest.creator,
+                    languages = manifest.languages,
+                    maxChars = identityBudget
+                )
+            } else {
+                null
+            }
+            val trainingText = if (identity == null || identity.text.isBlank()) {
+                corpus.text
+            } else {
+                corpus.text + "\n\n" + identity.text
+            }
 
             state = state.copy(
-                message = "Training tokenizer on ${corpus.text.length} characters…"
+                message = "Training tokenizer on ${trainingText.length} characters " +
+                    "(${identity?.conversations?.size ?: 0} identity conversations)…"
             )
             publishState(state, persist = false, forceNotify = true)
 
-            val tokenizer = loadOrTrainTokenizer(manifest, corpus.text)
+            val tokenizer = loadOrTrainTokenizer(manifest, trainingText)
             state = state.copy(message = "Tokenizing dataset…")
             publishState(state, persist = false, forceNotify = true)
 
             val tokens = withContext(Dispatchers.Default) {
-                getOrBuildTokens(manifest, tokenizer, corpus.text, state)
+                getOrBuildTokens(manifest, tokenizer, trainingText, state)
             }
             if (tokens.size < seq + 2) {
                 throw TrainingFailure(
@@ -545,7 +567,14 @@ class TrainingService : Service() {
             store.tokenizerFile(manifest.id),
             manifest.datasets,
             store.dataDir(manifest.id),
-            manifest.config.vocabSize
+            manifest.config.vocabSize,
+            identityKey = listOf(
+                manifest.name,
+                manifest.creator,
+                manifest.languages.joinToString(","),
+                manifest.behavior.reasoningEnabled.toString(),
+                manifest.behavior.toolCalling.toString()
+            ).joinToString("|")
         )
         TokenCache.load(cacheFile, cacheManifest, signature)?.let { return it }
 

@@ -10,6 +10,7 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -128,6 +129,17 @@ class TrainingSupportTest {
         assertNotNull(loaded)
         assertTrue(tokens.contentEquals(loaded!!))
         assertNull(TokenCache.load(cache, manifest, signature + "x"))
+    }
+
+    @Test
+    fun tokenCacheSignatureChangesWhenIdentityChanges() {
+        val dir = temp.newFolder("identity_cache")
+        val tokenizerFile = File(dir, "tokenizer.json").apply { writeText("[\"t\"]") }
+        val entries = listOf(entry("a", "a.txt", 1f))
+        File(dir, "a.txt").writeText("hello")
+        val first = TokenCache.signature(tokenizerFile, entries, dir, config.vocabSize, "Kite|Rin")
+        val second = TokenCache.signature(tokenizerFile, entries, dir, config.vocabSize, "Kite|Ada")
+        assertNotEquals(first, second)
     }
 
     @Test

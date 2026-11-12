@@ -155,7 +155,8 @@ object TokenCache {
         tokenizerFile: File,
         entries: List<DatasetMixEntry>,
         dataDir: File,
-        vocabSize: Int
+        vocabSize: Int,
+        identityKey: String = ""
     ): String {
         val md = MessageDigest.getInstance("SHA-256")
         fun mix(text: String) {
@@ -163,6 +164,7 @@ object TokenCache {
             md.update(0)
         }
         mix("v1")
+        mix(identityKey)
         mix(vocabSize.toString())
         mix(tokenizerFile.length().toString())
         mix(tokenizerFile.lastModified().toString())
