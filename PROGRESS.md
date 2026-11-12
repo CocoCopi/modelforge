@@ -484,3 +484,28 @@ Status: DONE - CI runs 43274899079 and 43276120628 green.
 Limitations: the NVIDIA endpoint is still not called in CI because no API key
 is available there. If the new UI reports a specific HTTP error or a no-text
 completion, that is the next diagnostic to investigate.
+
+## Production release v2.0.2 - disable hidden reasoning
+
+Status: DONE - CI run 43289520212 green.
+
+- Live NVIDIA testing showed MiniMax M3.1 Flash streamed `reasoning_content`
+  before any plan `content`. With a large output budget this could exceed the
+  request timeout and surface as "Could not reach NVIDIA: timeout".
+- The request now sends `reasoning_effort: "none"`, which was accepted by the
+  live endpoint and produced plan content directly. `max_tokens` is 4096 and
+  the overall non-stall cap is 300 seconds; the 90-second read timeout still
+  catches silent connections.
+- Verified with the app's actual prompt against the live endpoint: first stream
+  event about 6 seconds, complete plan about 47 seconds, valid JSON with 6-7
+  dataset suggestions.
+- Timeout errors now say whether zero stream events arrived (phone cannot reach
+  `integrate.api.nvidia.com`; try another network/VPN) or events arrived but
+  the model ran too long. DNS, connect and TLS failures have separate messages.
+- Version `2.0.2` (`versionCode 4`), signed with the stable key so it updates
+  over 2.0.0/2.0.1. Release:
+  https://github.com/CocoCopi/modelforge/releases/tag/v2.0.2
+- APK SHA-256:
+  `401440084462f6fae035ba286a9fd021ca32d9caae84a11a26352d0f37506e7d`
+- AAB SHA-256:
+  `76201563ccf754d47fea5dd55d1221bd4680871f47ae9f62f971bd43f1bc9527`
