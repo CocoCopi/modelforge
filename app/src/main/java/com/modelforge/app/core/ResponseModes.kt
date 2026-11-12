@@ -47,13 +47,15 @@ object ResponseModes {
     }
 
     fun splitThinking(text: String): ReasoningText {
-        val start = text.indexOf(" thinking")
+        val open = "<think>"
+        val start = text.indexOf(open)
         if (start < 0) return ReasoningText(null, text)
-        val end = text.indexOf("</think>", start + 7)
+        val contentStart = start + open.length
+        val end = text.indexOf("</think>", contentStart)
         if (end < 0) {
-            return ReasoningText(text.substring(start + 7).trimStart(), text.substring(0, start))
+            return ReasoningText(text.substring(contentStart).trimStart(), text.substring(0, start))
         }
-        val thinking = text.substring(start + 7, end).trim()
+        val thinking = text.substring(contentStart, end).trim()
         val answer = (text.substring(0, start) + text.substring(end + 8)).trim()
         return ReasoningText(thinking, answer)
     }
