@@ -254,3 +254,33 @@ Status: DONE - CI run 43165048507 green (host native tests, JVM tests,
 Remaining v2 work starts with the architecture registry, model config and the
 14-step one-question-per-screen wizard, then identity, speed/reasoning and the
 new architecture/modality paths.
+
+## v2 Phase 2 - registry, 14-step wizard and identity data
+
+Status: DONE - CI run 43173763360 green (host native tests, JVM tests,
+`verifyPaparazziDebug`, debug APK and artifacts).
+
+- Added `core/ArchitectureRegistry.kt`: a plugin interface with name,
+  modalities, parameter derivation, train/infer hooks and dataset format, plus
+  Stable/Experimental/Planned statuses. GPT text is Stable; NCM, image, audio,
+  CTC speech, captioning, text-to-image, TTS and video are listed as Planned
+  with honest reasons. `ModelConfig.architectureId` selects the plugin.
+- Added `ModelManifest.creator`, `languages` and `BehaviorConfig`, and a
+  `WizardDraft` SharedPreferences store so the wizard resumes after process
+  death or navigation. Starting training and discarding clear the draft.
+- Rebuilt the wizard as 14 one-question-per-screen steps with Back/Next, a ruler
+  progress mark, per-step validation, architecture cards, compression bit-grain
+  selector, dataset search/mix and auto-added Identity/Reasoning/Tool-call rows.
+  Unsupported choices are disabled with reasons instead of hidden. "Start
+  training" exists only on the review step.
+- Added `IdentityDataGenerator`: deterministic, offline identity conversations
+  in all offered languages, with openers and two-turn variants for variety,
+  a system prompt, and a 3-5% character budget. Training mixes this corpus near
+  the end of the dataset, and the token-cache signature now includes identity
+  and behaviour so stale caches are rejected. `IdentityDataGeneratorTest` checks
+  300+ conversations, variety, language coverage, model/creator naming, no
+  other-model claims, budgets and the system prompt.
+
+Still not wired: the 20-question post-training identity check and one-tap
+reinforce, preset save/load, runtime speed/reasoning switches, and the C++
+architecture plugins behind the new registry entries.
