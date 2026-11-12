@@ -116,7 +116,7 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
                 InfoRow("Full-precision estimate", formatBytes(config.fp32Bytes()))
                 InfoRow("Packed estimate (${config.bits}-bit)", formatBytes(estimatedPacked), ForgeColors.emberText)
                 InfoRow("Last checkpoint", if (checkpoints.first > 0) "${checkpoints.first} MB" else "none")
-                InfoRow("Best checkpoint", if (checkpoints.second > 0) "${checkpoints.second} MB" else "none")
+                InfoRow("Best checkpoint", if (checkpoints.second > 0L) "${checkpoints.second} MB" else "none")
                 Text(
                     "The packed estimate uses the exact export layout. Actual files are written " +
                         "when you export from the playground.",
@@ -152,7 +152,7 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
                     },
                     onClick = { vm.checkIdentity(modelId) },
                     enabled = !active && !(identityHere && identity.busy) &&
-                        checkpoints.second > 0,
+                        checkpoints.second > 0L,
                     modifier = Modifier.fillMaxWidth(),
                     primary = true
                 )

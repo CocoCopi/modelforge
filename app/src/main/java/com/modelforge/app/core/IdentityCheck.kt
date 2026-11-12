@@ -7,15 +7,12 @@ data class IdentityCheckResult(
     val total: Int
 ) {
     val score: Double get() = if (total <= 0) 0.0 else passed.toDouble() / total.toDouble()
-    val needsReinforce: Boolean get() = total > 0 && score < PASS_THRESHOLD
-
-    companion object {
-        const val PASS_THRESHOLD = 0.80
-    }
+    val needsReinforce: Boolean get() = total > 0 && score < IdentityCheck.PASS_THRESHOLD
 }
 
 object IdentityCheck {
     const val QUESTION_COUNT = 20
+    const val PASS_THRESHOLD = 0.80
 
     fun questions(languages: List<String>): List<String> =
         IdentityDataGenerator.checkQuestions(languages, QUESTION_COUNT)
