@@ -64,7 +64,7 @@ jobs:
           ctest --test-dir build-native --output-on-failure
 
       - name: Unit tests
-        run: ./gradlew testDebugUnitTest --stacktrace --no-daemon
+        run: ./gradlew testDebugUnitTest verifyPaparazziDebug --stacktrace --no-daemon
 
       - name: Upload screenshots
         if: always()

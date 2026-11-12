@@ -1,11 +1,11 @@
 package com.modelforge.app.ui.design
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -66,11 +66,11 @@ fun DesignGalleryScreen(onBack: () -> Unit = {}) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Swatch("hairline", ForgeColors.hairline, ForgeColors.ink)
             Swatch("muted", ForgeColors.inkMuted, ForgeColors.paper)
-            Spacer(Modifier.weight(1f))
-            Spacer(Modifier.weight(1f))
+            Swatch("ink wash", ForgeColors.inkWash, ForgeColors.ink)
+            Swatch("paper deep", ForgeColors.paperDeep, ForgeColors.ink)
         }
 
-        SectionHeading("Type scale", "Fraunces / Instrument Sans / JetBrains Mono")
+        SectionHeading("Type scale", "Fraunces / Sans / Mono")
         NotebookCard {
             Text("Editorial title", style = MaterialTheme.typography.displayMedium, color = ForgeColors.ink)
             Text(
@@ -158,6 +158,7 @@ private fun RowScope.Swatch(name: String, color: Color, onColor: Color) {
         modifier = Modifier
             .weight(1f)
             .background(color, RoundedCornerShape(4.dp))
+            .border(1.dp, ForgeColors.hairline, RoundedCornerShape(4.dp))
             .height(64.dp)
             .padding(6.dp),
         verticalArrangement = Arrangement.Bottom
