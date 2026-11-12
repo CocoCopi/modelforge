@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      MF_KEYSTORE_PATH: ${{ runner.temp }}/modelforge.keystore
+      MF_KEYSTORE_PATH: ${{ github.workspace }}/.modelforge.keystore
       MF_KEYSTORE_PASSWORD: ${{ secrets.MF_KEYSTORE_PASSWORD }}
       MF_KEY_PASSWORD: ${{ secrets.MF_KEY_PASSWORD }}
       MF_KEY_ALIAS: modelforge
