@@ -60,3 +60,23 @@ Measured locally (aarch64 host build, g++ -O2):
   identical to the in-memory model.
 - The overfit test took about 30 s on this proot after adding a persistent
   thread pool and small-work serial thresholds.
+
+## Phase 3 - tokenizer, Hugging Face search and dataset download
+
+Status: implemented, awaiting CI green.
+
+- Byte-level BPE tokenizer in Kotlin: 256 byte tokens plus learned merges,
+  whitespace-preserving chunk training with frequency weighting, deterministic
+  merges, JSON save/load, exact decode round trip. Training work is bounded by a
+  symbol budget so huge vocabularies do not run forever on a phone.
+- Hugging Face Hub search and details via Retrofit + OkHttp +
+  kotlinx.serialization, with an optional Bearer token interceptor that never
+  logs the token.
+- datasets-server info/splits/rows: discovers configs, splits and string
+  columns, pages through rows, extracts selected text columns, writes a UTF-8
+  cache file and reports rows/bytes/preview. Readable errors for 401/403/404/429
+  and timeouts.
+- License extraction from cardData/tags and a non-commercial warning helper.
+- EncryptedSharedPreferences token store (no plaintext fallback).
+- JVM tests cover BPE round trips/determinism plus a live integration test
+  against roneneldan/TinyStories (search, license, structure, 3-row download).
