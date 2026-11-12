@@ -2,4 +2,158 @@
 
 Train, quantize and test a small language model entirely on an Android phone.
 
-Work in progress. See `PROGRESS.md` for the honest phase-by-phase status.
+ModelForge is a from-scratch GPT implementation (C++ engine, Kotlin/Compose UI).
+There is no cloud training and no downloaded model weights: the app builds a
+byte-level BPE tokenizer, trains the network on data from Hugging Face, runs
+quantization-aware training, writes checkpoints, and exports packed 2/3/4/8-bit
+models. The playground generates text from either the full-precision checkpoint
+or a packed export and can share the packed file.
+
+Status: feature-complete through the playground (Phase 7 in `PROGRESS.md`).
+The repository builds and tests on GitHub Actions; the current output is a
+debug APK. See [Honest limitations](#honest-limitations) before trying it.
+
+## Features
+
+- **On-device architecture search** - `ConfigDeriver` finds a GPT shape within
+  5% of a requested parameter target, capped by measured RAM/CPU limits.
+- **From-scratch C++ engine** - LayerNorm, causal multi-head attention,
+  tanh-GELU MLP, tied embeddings, manual backprop, AdamW, NEON dot products and
+  a persistent thread pool. JNI handles are serialized and always freed.
+- **Real training service** - foreground service with progress notification,
+  pause/resume/stop actions, partial wake lock, battery/thermal auto-pause and
+  auto-resume, boot resume, and atomic checkpoints. `last.mfck` keeps AdamW
+  state for exact resume; `best.mfck` is weights-only for export.
+- **Hugging Face datasets** - search, config/split/text-column discovery,
+  license warnings, row/byte progress, weighted mixing, tokenizer training and a
+  token-id cache.
+- **Quantization-aware training (QAT)** - symmetric per-group 32 fake
+  quantization with straight-through estimation on linear layers only.
+- **Packed deployment format** - `MFPK` file with fp32 embeddings/norms/biases/
+  tied head and packed linear weights plus fp32 scales; packed inference decodes
+  groups on the fly instead of materializing fp32 matrices.
+- **Compose UI** - four-step wizard, live training dashboard with a loss chart
+  and samples, model details, and a playground with prompt/temperature/top-k/
+  top-p controls, measured tokens/second, export and share.
+- **Encrypted token storage** - optional Hugging Face token in
+  `EncryptedSharedPreferences`; no telemetry and no token logging.
+
+## Honest limitations
+
+- These are tiny models trained from scratch on a phone. Expect short, simple
+  text with repetition and grammar mistakes, not chatbot-level answers.
+- Only `arm64-v8a` is built. There is no x86 emulator or 32-bit build.
+- 2-bit and 3-bit exports are experimental; 4-bit is the recommended default.
+- Training time and memory vary a lot by phone. The app reports measured
+  tokens/second, RAM and an ETA instead of guessing.
+- The current CI output is a debug APK (debug signing), not a Play Store release.
+- The Compose screens are compiled into the APK but have not yet been exercised
+  on a physical device in this repository's CI. Native engine behaviour,
+  checkpoint resume and packed inference are covered by host C++ tests.
+
+## Install (current development build)
+
+1. Open the latest green **Build** run in the repository's Actions tab.
+2. Download the `modelforge-debug-apk` artifact.
+3. Unzip it and install `app-debug.apk` on an arm64 Android 8.0+ phone, for
+   example `adb install app-debug.apk`.
+4. Allow the notification permission when prompted so training controls are
+   visible in the notification shade.
+
+## Using the app
+
+1. **New model** - choose a parameter target and quantization width. The
+   architecture and counted parameter total update live.
+2. **Data** - search Hugging Face (optionally save a read token first), pick a
+   config, split and text columns, set rows and mix weight, then download.
+3. **Training** - adjust steps if desired and start. Training runs in the
+   foreground service; you can leave the app and use the notification actions.
+4. **Watch** - the dashboard shows step progress, loss, best loss, tokens/second,
+   RAM, ETA, battery/thermal state, a loss curve and generated samples.
+5. **Playground** - generate from the best checkpoint, or export a packed model
+   and switch the source to it. Use **Share file** to send the `.mfpk` file.
+
+Models, datasets and checkpoints stay in the app's private storage and are
+removed by **Delete model**.
+
+## Build and test
+
+Requirements: JDK 17, Android SDK platform 34, build-tools 34.0.0, NDK
+`26.1.10909125`, CMake `3.22.1`.
+
+```bash
+# JVM unit tests (tokenizer, config derivation, training support, JSON, HF live test)
+./gradlew testDebugUnitTest
+
+# ARM64 debug APK
+./gradlew assembleDebug
+
+# Host C++ tests: config, gradient check, overfit, optimizer resume, packed export
+cmake -S app/src/main/cpp -B build-native -DCMAKE_BUILD_TYPE=Release
+cmake --build build-native -j"$(nproc)"
+ctest --test-dir build-native --output-on-failure
+```
+
+CI (`.github/workflows/build.yml`) runs the host C++ tests, JVM tests and
+`assembleDebug` on every push, then uploads the debug APK artifact. The same
+workflow is the source of truth for "green".
+
+## Measured results
+
+Recorded from host builds in `PROGRESS.md`; they are not marketing estimates.
+
+- Gradient check: 37 entries, worst relative error `0.0183` (tolerance 0.05).
+- Overfit test (2x16 tokens, 600 AdamW steps): loss `3.445281 -> 0.000637`;
+  greedy generation after checkpoint reload is identical.
+- Optimizer resume: continues at step 601 and reproduces the reference loss
+  exactly (`0.000635` vs `0.000635`).
+- Packed test model (64-wide, 2 layers):
+
+| Bits | Packed size | Max logit difference | Argmax mismatches |
+| ---: | ----------: | -------------------: | ----------------: |
+| 8 | 100,420 B | 0.0000002 | 0 |
+| 4 | 67,652 B | 0.0000002 | 0 |
+| 2 | 51,268 B | 0.0000001 | 0 |
+
+The fp32 weights-only checkpoint for that model is about 289 KB, so the 4-bit
+export is roughly 4.3x smaller.
+
+## Architecture
+
+```
+app/src/main/
+  cpp/
+    core/gpt.{h,cpp}       GPT, backprop, AdamW, QAT, checkpoints, packed model
+    jni.cpp                JNI surface (model, training, packed, config)
+    tests/                 native config/gradient/overfit/packed tests
+  java/com/modelforge/app/
+    core/                  hardware detection, config derivation, manifest shape
+    data/                  model store, manifests, tokenizer, Hugging Face client
+    training/              foreground service, scheduler, mixer, token cache
+    nativebridge/          NativeBridge, NativeModel, PackedModel wrappers
+    ui/                    Compose screens and ModelForgeViewModel
+```
+
+Training state is persisted as JSON manifest/live-state files and binary
+checkpoints. The packed file layout is mirrored exactly by
+`ModelConfig.packedExportBytes(bits, group = 32)` and is unit tested.
+
+## Datasets, licensing and privacy
+
+- Dataset licenses are shown during selection. Licenses that look
+  non-commercial or unknown trigger a warning; you are responsible for checking
+  the dataset card and respecting its terms.
+- The only network traffic is to Hugging Face for search, metadata, dataset rows
+  and optional gated access. There is no analytics or crash upload.
+- The Hugging Face token, if saved, is encrypted on device and never written to
+  logs or committed. All models and datasets remain in app-private storage.
+
+## Known gaps
+
+- Physical-device UI verification and timing measurements are still pending.
+- Release signing/proguard and an app icon are not configured yet.
+- No Compose UI tests yet; native and JVM logic have automated coverage.
+- Export currently targets the best checkpoint; there is no separate
+  fine-tune/merge workflow.
+
+See `PROGRESS.md` for the phase-by-phase record and the exact CI run IDs.
