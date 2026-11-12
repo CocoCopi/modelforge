@@ -14,7 +14,8 @@ enum class Modality(val label: String) {
     TEXT("Text"),
     IMAGE("Image"),
     AUDIO("Audio"),
-    VIDEO("Video")
+    VIDEO("Video"),
+    DOCUMENT("Documents")
 }
 
 @Serializable
@@ -24,7 +25,9 @@ enum class DatasetFormat(val label: String) {
     IMAGE_CAPTIONS("Images + captions"),
     AUDIO_FOLDERS("Audio folders + labels"),
     AUDIO_TRANSCRIPTS("Audio + transcripts"),
-    VIDEO_CAPTIONS("Video + captions")
+    VIDEO_CAPTIONS("Video + captions"),
+    DOCUMENTS("Documents to text"),
+    MIXED("Mixed media")
 }
 
 @Serializable
@@ -37,6 +40,7 @@ data class ArchitectureInfo(
     val outputs: List<Modality>,
     val datasetFormat: DatasetFormat,
     val supportedBits: List<Int>,
+    val trainable: Boolean = false,
     val unavailableReason: String? = null
 ) {
     val available: Boolean
@@ -54,9 +58,10 @@ data class ArchitectureDerivation(
 }
 
 /**
- * One architecture plugin. Text GPT is the only implementation today; the
- * planned entries are visible in the wizard so the roadmap is honest, but they
- * cannot be selected until their native plugin and tests exist.
+ * One architecture plugin. The traditional transformer is the only path with
+ * a native trainer and tests today. NCM and the AI-designed architecture are
+ * selectable planning paths; their derive step deliberately returns no native
+ * config so the wizard cannot pretend to train them.
  */
 interface ArchitecturePlugin {
     val info: ArchitectureInfo
@@ -69,24 +74,19 @@ interface ArchitecturePlugin {
 object ArchitectureRegistry {
     const val GPT_TEXT = "gpt_text"
     const val NCM_TEXT = "ncm_text"
-    const val IMAGE_CLASSIFIER = "image_classifier"
-    const val AUDIO_CLASSIFIER = "audio_classifier"
-    const val CTC_SPEECH = "ctc_speech"
-    const val IMAGE_CAPTIONING = "image_captioning"
-    const val TEXT_TO_IMAGE = "text_to_image"
-    const val TEXT_TO_SPEECH = "text_to_speech"
-    const val VIDEO = "video"
+    const val AI_ARCHITECTURE = "ai_architecture"
 
     private val gpt = object : ArchitecturePlugin {
         override val info = ArchitectureInfo(
             id = GPT_TEXT,
-            displayName = "GPT for text",
+            displayName = "Traditional transformer",
             summary = "Decoder-only transformer for short-form text generation. Stable, tested end to end.",
             status = ArchitectureStatus.STABLE,
             inputs = listOf(Modality.TEXT),
             outputs = listOf(Modality.TEXT),
             datasetFormat = DatasetFormat.TEXT_CORPUS,
-            supportedBits = listOf(2, 3, 4, 8, 16, 32)
+            supportedBits = listOf(2, 3, 4, 8, 16, 32),
+            trainable = true
         )
 
         override fun derive(targetParams: Long, maxParams: Long, contextLength: Int?): ArchitectureDerivation {
@@ -113,7 +113,7 @@ object ArchitectureRegistry {
             maxParams.coerceIn(1_000_000L, 5_000_000L)
     }
 
-    private fun planned(
+    private fun experimental(
         id: String,
         name: String,
         summary: String,
@@ -126,93 +126,46 @@ object ArchitectureRegistry {
             id = id,
             displayName = name,
             summary = summary,
-            status = ArchitectureStatus.PLANNED,
+            status = ArchitectureStatus.EXPERIMENTAL,
             inputs = inputs,
             outputs = outputs,
             datasetFormat = format,
             supportedBits = emptyList(),
-            unavailableReason = reason
+            trainable = false
         )
 
         override fun derive(targetParams: Long, maxParams: Long, contextLength: Int?) =
-            ArchitectureDerivation(info = info, config = null, explanation = reason)
+            ArchitectureDerivation(
+                info = info,
+                config = null,
+                explanation = reason,
+                warning = "Plan only: native training for this architecture is not built yet."
+            )
 
         override fun defaultTarget(maxParams: Long): Long = 0L
     }
 
     private val plugins: List<ArchitecturePlugin> = listOf(
         gpt,
-        planned(
+        experimental(
             NCM_TEXT,
-            "NCM for text",
-            "Task-specific neural cognitive model with a VQ-VAE and level transformer.",
+            "NCM",
+            "Neural cognitive model with a VQ-VAE and level transformer. The wizard can plan its data, " +
+                "but the native NCM trainer and evaluation are not built yet.",
             listOf(Modality.TEXT),
             listOf(Modality.TEXT),
             DatasetFormat.TEXT_CORPUS,
-            "Native NCM stages and evaluation are not built yet."
+            "Native NCM stages and evaluation are not built yet, so it is a planning path only."
         ),
-        planned(
-            IMAGE_CLASSIFIER,
-            "Image classifier",
-            "Small convolutional classifier for folders of labelled images.",
-            listOf(Modality.IMAGE),
-            listOf(Modality.TEXT),
-            DatasetFormat.IMAGE_FOLDERS,
-            "Image preprocessing and the classifier engine are not built yet."
-        ),
-        planned(
-            AUDIO_CLASSIFIER,
-            "Audio classifier",
-            "Keyword spotting and short-clip classification.",
-            listOf(Modality.AUDIO),
-            listOf(Modality.TEXT),
-            DatasetFormat.AUDIO_FOLDERS,
-            "Audio decoding and the classifier engine are not built yet."
-        ),
-        planned(
-            CTC_SPEECH,
-            "Speech to text",
-            "Character-level CTC recogniser for short recordings.",
-            listOf(Modality.AUDIO),
-            listOf(Modality.TEXT),
-            DatasetFormat.AUDIO_TRANSCRIPTS,
-            "The CTC engine is not built yet."
-        ),
-        planned(
-            IMAGE_CAPTIONING,
-            "Image captioning",
-            "Vision encoder plus a small text decoder.",
-            listOf(Modality.IMAGE),
-            listOf(Modality.TEXT),
-            DatasetFormat.IMAGE_CAPTIONS,
-            "The vision encoder is not built yet."
-        ),
-        planned(
-            TEXT_TO_IMAGE,
-            "Text to image",
-            "A very small diffusion model for low-resolution images.",
-            listOf(Modality.TEXT),
-            listOf(Modality.IMAGE),
-            DatasetFormat.IMAGE_CAPTIONS,
-            "Planned after the classifier and captioning paths."
-        ),
-        planned(
-            TEXT_TO_SPEECH,
-            "Text to speech",
-            "Tiny phoneme or character acoustic model.",
-            listOf(Modality.TEXT),
-            listOf(Modality.AUDIO),
-            DatasetFormat.AUDIO_TRANSCRIPTS,
-            "Planned after the speech recognition path."
-        ),
-        planned(
-            VIDEO,
-            "Video",
-            "Frame sampling plus a small temporal model.",
-            listOf(Modality.VIDEO),
-            listOf(Modality.TEXT),
-            DatasetFormat.VIDEO_CAPTIONS,
-            "Planned last; video memory and decoding come first."
+        experimental(
+            AI_ARCHITECTURE,
+            "New architecture with AI",
+            "AI-designed experimental architecture. The NVIDIA planner can propose its data, rows and " +
+                "training recipe; there is no native engine to execute that design on the phone yet.",
+            Modality.values().toList(),
+            Modality.values().toList(),
+            DatasetFormat.MIXED,
+            "AI-designed architectures are planning-only until a native engine and tests exist."
         )
     )
 

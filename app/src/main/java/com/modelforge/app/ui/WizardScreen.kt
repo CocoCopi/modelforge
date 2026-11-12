@@ -33,6 +33,7 @@ import com.modelforge.app.core.ArchitectureStatus
 import com.modelforge.app.core.ConfigDeriver
 import com.modelforge.app.core.Modality
 import com.modelforge.app.data.DatasetMixEntry
+import com.modelforge.app.data.ai.AiDatasetSuggestion
 import com.modelforge.app.data.hf.HfDatasetSummary
 import com.modelforge.app.data.hf.isLikelyNonCommercial
 import com.modelforge.app.ui.design.BitGrainSelector
@@ -51,7 +52,7 @@ import com.modelforge.app.ui.theme.ForgeType
 
 private val languageChoices = listOf(
     "English", "Spanish", "French", "German", "Portuguese",
-    "Italian", "Hindi", "Japanese", "Chinese", "Arabic"
+    "Italian", "Hindi", "Japanese", "Chinese", "Arabic", "Tamil"
 )
 
 @Composable
@@ -91,7 +92,8 @@ fun WizardScreen(vm: ModelForgeViewModel) {
                 WizardStep.IDENTITY -> IdentityStep(vm, state)
                 WizardStep.SIZE -> SizeStep(vm, state)
                 WizardStep.ARCHITECTURE -> ArchitectureStep(vm, state)
-                WizardStep.MODALITIES -> ModalitiesStep(state)
+                WizardStep.MODALITIES -> ModalitiesStep(vm, state)
+                WizardStep.TRAINING_TIME -> TrainingTimeStep(vm, state)
                 WizardStep.LANGUAGES -> LanguagesStep(vm, state)
                 WizardStep.CONTEXT -> ContextStep(vm, state)
                 WizardStep.SPEED -> SpeedStep(vm, state)
@@ -99,8 +101,8 @@ fun WizardScreen(vm: ModelForgeViewModel) {
                 WizardStep.TOOLS -> ToolsStep(vm, state)
                 WizardStep.PERSONA -> PersonaStep(vm, state)
                 WizardStep.COMPRESSION -> CompressionStep(vm, state)
+                WizardStep.AI_PLAN -> AiPlanStep(vm, state)
                 WizardStep.DATASETS -> DatasetStep(vm, state)
-                WizardStep.BUDGET -> BudgetStep(vm, state)
                 WizardStep.REVIEW -> ReviewStep(vm, state)
             }
 
@@ -225,21 +227,231 @@ private fun ArchitectureStep(vm: ModelForgeViewModel, state: WizardState) {
 }
 
 @Composable
-private fun ModalitiesStep(state: WizardState) {
+private fun ModalitiesStep(vm: ModelForgeViewModel, state: WizardState) {
     val info = ArchitectureRegistry.info(state.architectureId)
-    NotebookCard {
-        SmallCaps("INPUT")
-        Text(info.inputs.joinToString(" + ") { it.label }, style = ForgeType.monoLarge, color = ForgeColors.ink)
-        Hairline()
-        SmallCaps("OUTPUT")
-        Text(info.outputs.joinToString(" + ") { it.label }, style = ForgeType.monoLarge, color = ForgeColors.emberText)
-        Hairline()
-        LedgerStat("dataset format", info.datasetFormat.label)
-        LedgerStat("quantization", if (info.supportedBits.isEmpty()) "not available" else "${info.supportedBits.joinToString("/")}-bit")
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        SectionCard("Input") {
+            ModalityChoices(state.inputModalities) { vm.toggleInputModality(it) }
+        }
+        SectionCard("Output") {
+            ModalityChoices(state.outputModalities) { vm.toggleOutputModality(it) }
+        }
+        NotebookCard {
+            LedgerStat("architecture", info.displayName)
+            LedgerStat("dataset format", info.datasetFormat.label)
+            LedgerStat(
+                "quantization",
+                if (info.supportedBits.isEmpty()) "not available" else "${info.supportedBits.joinToString("/")}-bit"
+            )
+            Text(
+                "The NVIDIA planner uses these choices to recommend data. The current native trainer can " +
+                    "only train text-to-text, so other modality combinations stay plan-only.",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (state.inputModalities != setOf(Modality.TEXT) ||
+                    state.outputModalities != setOf(Modality.TEXT)
+                ) ForgeColors.ochreInk else ForgeColors.inkMuted
+            )
+        }
+    }
+}
+
+@Composable
+private fun ModalityChoices(selected: Set<Modality>, onToggle: (Modality) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Modality.values().toList().chunked(2).forEach { row ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                row.forEach { modality ->
+                    Choice(
+                        text = modality.label,
+                        selected = modality in selected,
+                        onClick = { onToggle(modality) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                if (row.size == 1) Box(Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+@Composable
+private fun TrainingTimeStep(vm: ModelForgeViewModel, state: WizardState) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            listOf(30, 60, 120, 240, 480).forEach { minutes ->
+                Choice(
+                    text = if (minutes < 60) "${minutes}m" else "${minutes / 60}h",
+                    selected = state.trainingMinutes == minutes,
+                    onClick = { vm.updateTrainingMinutes(minutes) }
+                )
+            }
+        }
+        NotebookCard {
+            LedgerStat("time available", formatMinutes(state.trainingMinutes))
+            LedgerStat("current steps", state.steps.toString())
+            Slider(
+                value = state.trainingMinutes.toFloat(),
+                onValueChange = { vm.updateTrainingMinutes(it.toInt()) },
+                valueRange = 15f..480f,
+                steps = 30
+            )
+            Text(
+                "The AI architect turns this time budget into steps, batch size and mix weights. " +
+                    "Actual speed depends on this phone and is measured only after training starts.",
+                style = MaterialTheme.typography.bodySmall,
+                color = ForgeColors.inkMuted
+            )
+        }
+    }
+}
+
+@Composable
+private fun AiPlanStep(vm: ModelForgeViewModel, state: WizardState) {
+    val ai by vm.aiPlanner.collectAsState()
+    val keyPresent by vm.aiKeyPresent.collectAsState()
+    var showKey by remember { mutableStateOf(false) }
+    SectionCard("NVIDIA architect") {
+        LedgerStat("api key", if (keyPresent) "saved securely" else "not set")
         Text(
-            "These follow from ${info.displayName}. Changing the architecture changes the data shape and the export path.",
+            "Uses ${com.modelforge.app.data.ai.NvidiaClient.MODEL} through NVIDIA's hosted API. " +
+                "The key is stored with EncryptedSharedPreferences, sent only to NVIDIA, and never logged.",
             style = MaterialTheme.typography.bodySmall,
             color = ForgeColors.inkMuted
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ForgeOutlineButton(
+                if (keyPresent) "Replace key" else "Add key",
+                onClick = { showKey = true },
+                modifier = Modifier.weight(1f)
+            )
+            if (keyPresent) {
+                ForgeOutlineButton(
+                    "Clear",
+                    onClick = vm::clearAiKey,
+                    modifier = Modifier.weight(1f),
+                    tint = ForgeColors.error
+                )
+            }
+        }
+        ForgeButton(
+            if (ai.busy) "Designing…" else "Ask AI to design",
+            onClick = vm::requestAiPlan,
+            enabled = keyPresent && !ai.busy,
+            modifier = Modifier.fillMaxWidth(),
+            primary = true
+        )
+        ai.error?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = ForgeColors.error)
+        }
+        if (ai.busy && ai.streaming.isNotBlank()) {
+            Hairline()
+            SmallCaps("STREAMING")
+            Text(
+                ai.streaming.takeLast(1200),
+                style = ForgeType.monoSmall,
+                color = ForgeColors.inkMuted
+            )
+        }
+    }
+    ai.plan?.let { plan ->
+        SectionCard("Overview") {
+            Text(
+                plan.overview.ifBlank { "The AI returned no overview." },
+                style = MaterialTheme.typography.bodyMedium,
+                color = ForgeColors.ink
+            )
+            if (plan.analogy.isNotBlank()) {
+                Text(
+                    plan.analogy,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ForgeColors.verdigris
+                )
+            }
+        }
+        SectionCard("Training settings") {
+            LedgerStat("steps", plan.training.steps.toString())
+            LedgerStat("batch", plan.training.batchSize.toString())
+            LedgerStat("sequence", plan.training.seqLength.toString())
+            LedgerStat("learning rate", String.format("%.1e", plan.training.learningRate))
+            LedgerStat("warmup", "${plan.training.warmupSteps} steps")
+            Text(
+                "Applied to this draft. You can still adjust them on the next screens.",
+                style = MaterialTheme.typography.bodySmall,
+                color = ForgeColors.inkMuted
+            )
+        }
+        SectionCard("Recommended datasets") {
+            if (plan.datasets.isEmpty()) {
+                Text(
+                    "The AI recommended no datasets. Search manually on the next screen.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ForgeColors.ochreInk
+                )
+            }
+            plan.datasets.forEach { suggestion ->
+                AiDatasetRow(suggestion, busy = ai.busy, onInspect = { vm.inspectAiDataset(suggestion) })
+            }
+        }
+        if (plan.warnings.isNotEmpty()) {
+            SectionCard("Warnings") {
+                plan.warnings.forEach {
+                    Text("· $it", style = MaterialTheme.typography.bodySmall, color = ForgeColors.ochreInk)
+                }
+            }
+        }
+        if (plan.notes.isNotEmpty()) {
+            SectionCard("Design notes") {
+                plan.notes.forEach {
+                    Text("· $it", style = MaterialTheme.typography.bodySmall, color = ForgeColors.inkMuted)
+                }
+            }
+        }
+    }
+    if (showKey) {
+        AiKeyDialog(
+            keyPresent = keyPresent,
+            onDismiss = { showKey = false },
+            onSave = { vm.saveAiKey(it); showKey = false },
+            onClear = { vm.clearAiKey(); showKey = false }
+        )
+    }
+}
+
+@Composable
+private fun AiDatasetRow(suggestion: AiDatasetSuggestion, busy: Boolean, onInspect: () -> Unit) {
+    NotebookCard {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(
+                suggestion.datasetId,
+                style = MaterialTheme.typography.bodyMedium,
+                color = ForgeColors.verdigris
+            )
+            StatusTag(suggestion.purpose, ForgeColors.verdigris)
+        }
+        Text(
+            "${suggestion.rows} rows · ${String.format("%.1f", suggestion.weight)}x · " +
+                "license ${suggestion.license ?: "unknown"}",
+            style = ForgeType.monoSmall,
+            color = ForgeColors.inkMuted
+        )
+        if (!suggestion.commercialUse) {
+            Text(
+                "Commercial use is not confirmed. Verify the licence before shipping.",
+                style = MaterialTheme.typography.bodySmall,
+                color = ForgeColors.ochreInk
+            )
+        }
+        if (suggestion.reason.isNotBlank()) {
+            Text(suggestion.reason, style = MaterialTheme.typography.bodySmall, color = ForgeColors.inkMuted)
+        }
+        ForgeOutlineButton(
+            "Inspect on Hugging Face",
+            onClick = onInspect,
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth()
         )
     }
 }
@@ -689,42 +901,6 @@ private fun DatasetEntryRow(entry: DatasetMixEntry, onRemove: () -> Unit) {
 }
 
 @Composable
-private fun BudgetStep(vm: ModelForgeViewModel, state: WizardState) {
-    val config = state.config
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            listOf(100, 300, 500, 1000, 2000).forEach { steps ->
-                Choice(
-                    text = "$steps steps",
-                    selected = state.steps == steps,
-                    onClick = { vm.updateSteps(steps) }
-                )
-            }
-        }
-        NotebookCard {
-            LedgerStat("steps", state.steps.toString())
-            LedgerStat("tokens per step", (state.batchSize * state.seqLength).toString())
-            LedgerStat("tokens seen", formatCount(state.steps.toLong() * state.batchSize * state.seqLength))
-            LedgerStat("learning rate", String.format("%.1e", state.learningRate))
-            LedgerStat("warmup", "${state.warmupSteps} steps")
-            if (config != null) {
-                LedgerStat("model file", formatBytes(config.packedExportBytes(state.bits)))
-            }
-            val datasetBytes = state.datasets.sumOf { it.bytes }
-            LedgerStat("dataset cache", formatBytes(datasetBytes))
-            Text(
-                "Training time is measured after the service starts; this screen never invents a speed number.",
-                style = MaterialTheme.typography.bodySmall,
-                color = ForgeColors.inkMuted
-            )
-        }
-    }
-}
-
-@Composable
 private fun ReviewStep(vm: ModelForgeViewModel, state: WizardState) {
     val config = state.config
     val info = ArchitectureRegistry.info(state.architectureId)
@@ -735,6 +911,9 @@ private fun ReviewStep(vm: ModelForgeViewModel, state: WizardState) {
         LedgerStat("creator", state.creator.ifBlank { "—" })
         LedgerStat("architecture", info.displayName)
         LedgerStat("parameters", config?.let { ConfigDeriver.formatCount(it.paramCount()) } ?: "—")
+        LedgerStat("inputs", state.inputModalities.sortedBy { it.ordinal }.joinToString(", ") { it.label })
+        LedgerStat("outputs", state.outputModalities.sortedBy { it.ordinal }.joinToString(", ") { it.label })
+        LedgerStat("training time", formatMinutes(state.trainingMinutes))
         LedgerStat("context", (state.contextChoice.takeIf { it > 0 } ?: config?.contextLength)?.toString() ?: "—")
         LedgerStat("languages", state.languages.joinToString(", ").ifBlank { "—" })
         LedgerStat("response speed", state.speedMode)
@@ -826,7 +1005,16 @@ private fun ReviewStep(vm: ModelForgeViewModel, state: WizardState) {
         )
         if (!state.canStart) {
             Text(
-                "Add a name, a creator and at least one dataset before starting.",
+                when {
+                    !info.trainable -> "This architecture is a planning path. Native training is not built yet."
+                    state.inputModalities != setOf(Modality.TEXT) ||
+                        state.outputModalities != setOf(Modality.TEXT) ->
+                        "Native training currently supports text-to-text only."
+                    state.datasets.isEmpty() -> "Add at least one dataset before starting."
+                    state.name.isBlank() || state.creator.isBlank() ->
+                        "Add a name and a creator before starting."
+                    else -> "Check the model plan before starting."
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = ForgeColors.ochreInk
             )
@@ -915,11 +1103,14 @@ private fun advanceBlockedReason(state: WizardState): String? {
             state.creator.isBlank() -> "Say who created it."
             else -> null
         }
-        WizardStep.SIZE -> if (state.config == null) "Choose a size that fits this device." else null
+        WizardStep.SIZE -> if (state.config == null &&
+            ArchitectureRegistry.info(state.architectureId).trainable
+        ) "Choose a size that fits this device." else null
         WizardStep.ARCHITECTURE -> if (!ArchitectureRegistry.info(state.architectureId).available) {
             "Choose an available architecture."
         } else null
         WizardStep.MODALITIES -> null
+        WizardStep.TRAINING_TIME -> if (state.trainingMinutes < 15) "Choose at least 15 minutes." else null
         WizardStep.LANGUAGES -> if (state.languages.isEmpty()) "Choose at least one language." else null
         WizardStep.CONTEXT -> if ((state.contextChoice.takeIf { it > 0 } ?: state.config?.contextLength ?: 0) <= 0) {
             "Choose a context length."
@@ -928,13 +1119,17 @@ private fun advanceBlockedReason(state: WizardState): String? {
         WizardStep.REASONING -> null
         WizardStep.TOOLS -> null
         WizardStep.PERSONA -> null
-        WizardStep.COMPRESSION -> if (state.bits !in ArchitectureRegistry.supportedBits(state.architectureId)) {
-            "Choose a supported compression."
-        } else null
+        WizardStep.COMPRESSION -> {
+            val bits = ArchitectureRegistry.supportedBits(state.architectureId)
+            if (bits.isNotEmpty() && state.bits !in bits) "Choose a supported compression." else null
+        }
+        WizardStep.AI_PLAN -> null
         WizardStep.DATASETS -> if (state.datasets.isEmpty()) "Add at least one dataset." else null
-        WizardStep.BUDGET -> if (state.steps < 100) "Choose at least 100 steps." else null
         WizardStep.REVIEW -> null
     }
 }
 
 private fun formatCount(value: Long): String = ConfigDeriver.formatCount(value)
+
+private fun formatMinutes(minutes: Int): String =
+    if (minutes < 60) "$minutes min" else "${minutes / 60} h ${minutes % 60} min".replace(" 0 min", "")

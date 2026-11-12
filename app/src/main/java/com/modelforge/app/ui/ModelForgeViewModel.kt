@@ -12,6 +12,7 @@ import com.modelforge.app.core.ConfigDeriver
 import com.modelforge.app.core.HardwareDetector
 import com.modelforge.app.core.IdentityCheck
 import com.modelforge.app.core.ModelConfig
+import com.modelforge.app.core.Modality
 import com.modelforge.app.core.ResponseModes
 import com.modelforge.app.data.DatasetMixEntry
 import com.modelforge.app.data.ModelCard
@@ -24,10 +25,17 @@ import com.modelforge.app.data.TrainingLiveState
 import com.modelforge.app.data.TrainingSettings
 import com.modelforge.app.data.WizardDraft
 import com.modelforge.app.data.WizardDraftStore
+import com.modelforge.app.data.ai.AiDatasetSuggestion
+import com.modelforge.app.data.ai.AiPlan
+import com.modelforge.app.data.ai.AiPlanRequest
+import com.modelforge.app.data.ai.AiPlanner
+import com.modelforge.app.data.ai.AiTrainingPlan
+import com.modelforge.app.data.ai.NvidiaClient
 import com.modelforge.app.data.hf.DatasetStructure
 import com.modelforge.app.data.hf.DownloadStats
 import com.modelforge.app.data.hf.HfClient
 import com.modelforge.app.data.hf.HfDatasetSummary
+import com.modelforge.app.data.hf.HfException
 import com.modelforge.app.data.hf.HfRepository
 import com.modelforge.app.data.hf.isLikelyNonCommercial
 import com.modelforge.app.data.tokenizer.BpeTokenizer
@@ -58,6 +66,9 @@ data class WizardState(
     val creator: String = "",
     val architectureId: String = ArchitectureRegistry.GPT_TEXT,
     val targetParams: Long = 5_000_000L,
+    val inputModalities: Set<Modality> = setOf(Modality.TEXT),
+    val outputModalities: Set<Modality> = setOf(Modality.TEXT),
+    val trainingMinutes: Int = 60,
     val contextChoice: Int = 0,
     val languages: Set<String> = setOf("English"),
     val speedMode: String = "normal",
@@ -94,8 +105,18 @@ data class WizardState(
     val canStart: Boolean
         get() = modelId != null && config != null && name.isNotBlank() &&
             creator.isNotBlank() && datasets.isNotEmpty() &&
-            ArchitectureRegistry.info(architectureId).available
+            ArchitectureRegistry.info(architectureId).trainable &&
+            inputModalities == setOf(Modality.TEXT) &&
+            outputModalities == setOf(Modality.TEXT)
 }
+
+data class AiPlannerState(
+    val busy: Boolean = false,
+    val streaming: String = "",
+    val plan: AiPlan? = null,
+    val applied: Boolean = false,
+    val error: String? = null
+)
 
 data class PlaygroundState(
     val modelId: String = "",
@@ -150,6 +171,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     private val presetStore = PresetStore(app)
     private val tokenStore = SecureTokenStore(app)
     private val hf = HfRepository(HfClient.create { tokenStore.token })
+    private val nvidia = NvidiaClient()
 
     val hardware = HardwareDetector.detect(app)
     val maxTargetParams: Long = hardware.maxTrainableParams
@@ -169,6 +191,12 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     private val _tokenPresent = MutableStateFlow(tokenStore.token != null)
     val tokenPresent: StateFlow<Boolean> = _tokenPresent.asStateFlow()
 
+    private val _aiKeyPresent = MutableStateFlow(tokenStore.nvidiaToken != null)
+    val aiKeyPresent: StateFlow<Boolean> = _aiKeyPresent.asStateFlow()
+
+    private val _aiPlanner = MutableStateFlow(AiPlannerState())
+    val aiPlanner: StateFlow<AiPlannerState> = _aiPlanner.asStateFlow()
+
     private val _notice = MutableStateFlow<String?>(null)
     val notice: StateFlow<String?> = _notice.asStateFlow()
 
@@ -185,6 +213,9 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 creator = state.creator,
                 architectureId = state.architectureId,
                 targetParams = state.targetParams,
+                inputModalities = state.inputModalities.toList(),
+                outputModalities = state.outputModalities.toList(),
+                trainingMinutes = state.trainingMinutes,
                 contextLength = state.contextChoice,
                 languages = state.languages.toList(),
                 speedMode = state.speedMode,
@@ -252,6 +283,9 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 creator = draft.creator,
                 architectureId = architectureId,
                 targetParams = target,
+                inputModalities = (draft.inputModalities.ifEmpty { listOf(Modality.TEXT) }).toSet(),
+                outputModalities = (draft.outputModalities.ifEmpty { listOf(Modality.TEXT) }).toSet(),
+                trainingMinutes = draft.trainingMinutes.coerceIn(15, 480),
                 contextChoice = draft.contextLength,
                 languages = draft.languages.toSet(),
                 speedMode = draft.speedMode,
@@ -311,6 +345,8 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 architectureId = id,
                 config = config,
+                inputModalities = setOf(Modality.TEXT),
+                outputModalities = setOf(Modality.TEXT),
                 bits = if (it.bits in info.supportedBits) it.bits else info.supportedBits.firstOrNull() ?: 4,
                 error = null
             )
@@ -350,6 +386,150 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         updateWizard { state ->
             val next = if (language in state.languages) state.languages - language else state.languages + language
             state.copy(languages = next, error = null)
+        }
+    }
+
+    fun toggleInputModality(modality: Modality) {
+        updateWizard { state ->
+            val next = if (modality in state.inputModalities) state.inputModalities - modality
+            else state.inputModalities + modality
+            if (next.isEmpty()) state.copy(error = "Keep at least one input modality.") else
+                state.copy(inputModalities = next, error = null)
+        }
+    }
+
+    fun toggleOutputModality(modality: Modality) {
+        updateWizard { state ->
+            val next = if (modality in state.outputModalities) state.outputModalities - modality
+            else state.outputModalities + modality
+            if (next.isEmpty()) state.copy(error = "Keep at least one output modality.") else
+                state.copy(outputModalities = next, error = null)
+        }
+    }
+
+    fun updateTrainingMinutes(minutes: Int) {
+        updateWizard { it.copy(trainingMinutes = minutes.coerceIn(15, 480), error = null) }
+    }
+
+    fun saveAiKey(value: String) {
+        if (value.isNotBlank() && !tokenStore.isAvailable) {
+            _aiPlanner.value = AiPlannerState(error = "Secure storage is unavailable on this device, so the key was not saved.")
+            return
+        }
+        tokenStore.nvidiaToken = value
+        _aiKeyPresent.value = tokenStore.nvidiaToken != null
+        _aiPlanner.value = AiPlannerState(
+            error = when {
+                value.isBlank() -> "NVIDIA API key cleared."
+                !_aiKeyPresent.value -> "The key could not be saved securely."
+                else -> null
+            }
+        )
+    }
+
+    fun clearAiKey() {
+        tokenStore.clearNvidia()
+        _aiKeyPresent.value = false
+        _aiPlanner.value = AiPlannerState(error = "NVIDIA API key cleared. AI planning is off.")
+    }
+
+    fun requestAiPlan() {
+        val state = _wizard.value
+        val key = tokenStore.nvidiaToken
+        if (key.isNullOrBlank()) {
+            _aiPlanner.value = AiPlannerState(error = "Add your NVIDIA API key first. It is stored encrypted and never logged.")
+            return
+        }
+        if (_aiPlanner.value.busy) return
+        val req = AiPlanRequest(
+            name = state.name,
+            creator = state.creator,
+            architecture = state.architectureId,
+            parameters = state.config?.paramCount() ?: state.targetParams,
+            inputs = state.inputModalities.map { it.label },
+            outputs = state.outputModalities.map { it.label },
+            languages = state.languages.toList(),
+            trainingMinutes = state.trainingMinutes,
+            context = state.contextChoice.takeIf { it > 0 } ?: state.config?.contextLength ?: 128,
+            speed = state.speedMode,
+            reasoning = state.reasoningEnabled,
+            toolCalling = state.toolCalling,
+            persona = state.persona,
+            bits = state.bits,
+            currentDatasets = state.datasets.map { it.datasetId }
+        )
+        _aiPlanner.value = AiPlannerState(busy = true, streaming = "")
+        viewModelScope.launch {
+            try {
+                val raw = nvidia.streamChat(key, AiPlanner.messages(req)) { delta ->
+                    _aiPlanner.update { it.copy(streaming = (it.streaming + delta).takeLast(12000)) }
+                }
+                val plan = AiPlanner.parse(raw)
+                _aiPlanner.value = AiPlannerState(plan = plan, applied = true)
+                applyAiTraining(plan.training)
+            } catch (t: Throwable) {
+                _aiPlanner.value = AiPlannerState(
+                    error = t.message ?: "AI planning failed. Check the key and connection."
+                )
+            }
+        }
+    }
+
+    private fun applyAiTraining(training: AiTrainingPlan) {
+        updateWizard { state ->
+            val seq = training.seqLength.coerceAtMost(
+                state.contextChoice.takeIf { it > 0 } ?: state.config?.contextLength ?: training.seqLength
+            )
+            val steps = training.steps.coerceIn(100, 2000)
+            state.copy(
+                steps = steps,
+                batchSize = training.batchSize.coerceIn(1, 32),
+                seqLength = seq.coerceAtLeast(32),
+                learningRate = training.learningRate.coerceIn(1e-5f, 1e-2f),
+                warmupSteps = training.warmupSteps.coerceIn(1, steps),
+                checkpointEvery = maxOf(20, steps / 10),
+                sampleEvery = maxOf(20, steps / 5),
+                corpusChars = (steps.toLong() * training.batchSize * seq * 3L)
+                    .coerceIn(200_000L, 2_000_000L)
+                    .toInt(),
+                error = null
+            )
+        }
+    }
+
+    fun inspectAiDataset(suggestion: AiDatasetSuggestion) {
+        if (_aiPlanner.value.busy) return
+        _aiPlanner.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch {
+            try {
+                val detail = hf.detail(suggestion.datasetId)
+                val structure = hf.structure(suggestion.datasetId)
+                if (structure.configs.isEmpty()) throw HfException("No configs were found for ${suggestion.datasetId}.")
+                val config = structure.configs.firstOrNull { it.name == suggestion.config }
+                    ?: structure.configs.first()
+                val split = config.splits.firstOrNull { it == suggestion.split }
+                    ?: config.splits.firstOrNull()
+                    ?: throw HfException("No split was found for ${suggestion.datasetId}.")
+                val wanted = suggestion.columns.filter { it in config.textColumns }.toSet()
+                val columns = wanted.ifEmpty { config.textColumns.toSet() }
+                updateWizard {
+                    it.copy(
+                        selectedDataset = detail,
+                        structure = structure,
+                        configName = config.name,
+                        splitName = split,
+                        columns = columns,
+                        rows = suggestion.rows.coerceIn(100, 5000),
+                        weight = suggestion.weight.coerceIn(0.1f, 5f),
+                        step = WizardStep.DATASETS.ordinal,
+                        error = null
+                    )
+                }
+                _aiPlanner.update { it.copy(busy = false) }
+                _notice.value = "Inspected ${suggestion.datasetId}. Review the columns, then download it."
+            } catch (t: Throwable) {
+                _aiPlanner.update { it.copy(busy = false, error = t.message ?: "Could not inspect the suggested dataset.") }
+            }
         }
     }
 
@@ -674,6 +854,14 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         val id = state.modelId
         val config = state.config
         if (id == null || config == null) return
+        if (!ArchitectureRegistry.info(state.architectureId).trainable) {
+            updateWizard { it.copy(error = "This architecture is a planning path; native training is not built yet.") }
+            return
+        }
+        if (state.inputModalities != setOf(Modality.TEXT) || state.outputModalities != setOf(Modality.TEXT)) {
+            updateWizard { it.copy(error = "Native training currently supports text-to-text only.") }
+            return
+        }
         if (state.datasets.isEmpty()) {
             updateWizard { it.copy(error = "Add at least one dataset before training.") }
             return

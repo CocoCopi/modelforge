@@ -14,12 +14,18 @@ enum class WizardStep(val label: String, val question: String, val help: String)
     ARCHITECTURE(
         "Architecture",
         "What kind of model is it?",
-        "Only tested paths can be selected. Planned paths show why they are disabled."
+        "Choose a traditional transformer, NCM, or a new AI-designed architecture. " +
+            "Only the transformer has a native trainer today; the other two are honest planning paths."
     ),
     MODALITIES(
         "Modalities",
         "What goes in, and what comes out?",
-        "Modalities come from the architecture, so they cannot drift out of sync."
+        "Choose every input and output the model should handle. The NVIDIA planner uses this to select data."
+    ),
+    TRAINING_TIME(
+        "Training time",
+        "How long can training run?",
+        "Pick the time you can give it. The AI planner turns that budget into steps and settings."
     ),
     LANGUAGES(
         "Languages",
@@ -56,15 +62,16 @@ enum class WizardStep(val label: String, val question: String, val help: String)
         "How small should the file be?",
         "Quantization shrinks linear weights. The bit density shows the tradeoff."
     ),
+    AI_PLAN(
+        "AI design",
+        "What does the AI architect recommend?",
+        "The NVIDIA planner proposes an overview, datasets, rows, mix weights and training settings. " +
+            "Every dataset is checked on Hugging Face before download."
+    ),
     DATASETS(
         "Datasets",
         "What should it learn from?",
-        "Search Hugging Face, inspect the columns, and add one or more datasets."
-    ),
-    BUDGET(
-        "Training budget",
-        "How long should training run?",
-        "More steps mean more practice. The estimate uses this model's real disk layout."
+        "Search Hugging Face, inspect the columns, and add the datasets the AI recommended."
     ),
     REVIEW(
         "Review",

@@ -6,9 +6,9 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
 /**
- * Stores an optional Hugging Face token in EncryptedSharedPreferences.
- * If the keystore is unavailable the store reports that instead of silently
- * writing a plaintext token.
+ * Stores optional Hugging Face and NVIDIA API credentials in
+ * EncryptedSharedPreferences. If the keystore is unavailable the store reports
+ * that instead of silently writing a plaintext key.
  */
 class SecureTokenStore(context: Context) {
 
@@ -38,12 +38,26 @@ class SecureTokenStore(context: Context) {
             }.apply()
         }
 
+    var nvidiaToken: String?
+        get() = prefs?.getString(KEY_NVIDIA, null)?.takeIf { it.isNotBlank() }
+        set(value) {
+            val p = prefs ?: return
+            p.edit().apply {
+                if (value.isNullOrBlank()) remove(KEY_NVIDIA) else putString(KEY_NVIDIA, value.trim())
+            }.apply()
+        }
+
     fun clear() {
         prefs?.edit()?.remove(KEY_TOKEN)?.apply()
+    }
+
+    fun clearNvidia() {
+        prefs?.edit()?.remove(KEY_NVIDIA)?.apply()
     }
 
     companion object {
         private const val FILE_NAME = "modelforge_secrets"
         private const val KEY_TOKEN = "hf_token"
+        private const val KEY_NVIDIA = "nvidia_api_key"
     }
 }

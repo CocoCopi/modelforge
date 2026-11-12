@@ -45,18 +45,27 @@ import com.modelforge.app.ui.theme.ForgeType
 fun HomeScreen(vm: ModelForgeViewModel) {
     val models by vm.models.collectAsState()
     val tokenPresent by vm.tokenPresent.collectAsState()
+    val aiKeyPresent by vm.aiKeyPresent.collectAsState()
     val notice by vm.notice.collectAsState()
     var showTokenDialog by remember { mutableStateOf(false) }
+    var showAiKeyDialog by remember { mutableStateOf(false) }
 
     ForgeScaffold(
         title = "The workbench",
         subtitle = "Train a small language model on this phone. No cloud, no hidden numbers.",
         actions = {
-            ForgeOutlineButton(
-                if (tokenPresent) "HF token · set" else "HF token",
-                onClick = { showTokenDialog = true },
-                tint = if (tokenPresent) ForgeColors.verdigris else ForgeColors.ink
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                ForgeOutlineButton(
+                    if (tokenPresent) "HF token · set" else "HF token",
+                    onClick = { showTokenDialog = true },
+                    tint = if (tokenPresent) ForgeColors.verdigris else ForgeColors.ink
+                )
+                ForgeOutlineButton(
+                    if (aiKeyPresent) "AI key · set" else "AI key",
+                    onClick = { showAiKeyDialog = true },
+                    tint = if (aiKeyPresent) ForgeColors.verdigris else ForgeColors.ink
+                )
+            }
         }
     ) {
         LazyColumn(
@@ -146,6 +155,15 @@ fun HomeScreen(vm: ModelForgeViewModel) {
                 ForgeOutlineButton("Design proof", onClick = vm::openGallery)
             }
         }
+    }
+
+    if (showAiKeyDialog) {
+        AiKeyDialog(
+            keyPresent = aiKeyPresent,
+            onDismiss = { showAiKeyDialog = false },
+            onSave = { vm.saveAiKey(it); showAiKeyDialog = false },
+            onClear = { vm.clearAiKey(); showAiKeyDialog = false }
+        )
     }
 
     if (showTokenDialog) {

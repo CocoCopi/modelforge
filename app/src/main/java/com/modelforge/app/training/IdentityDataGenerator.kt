@@ -114,6 +114,7 @@ object IdentityDataGenerator {
             "Japanese" -> listOf("", "こんにちは！", "ちょっと質問です。", "ねえ、", "すみません、")
             "Chinese" -> listOf("", "你好！", "快速问一下：", "嘿，", "打扰一下，")
             "Arabic" -> listOf("", "مرحبًا! ", "سؤال سريع: ", "يا، ", "عذرًا، ")
+            "Tamil" -> listOf("", "வணக்கம்! ", "ஒரு சிறு கேள்வி: ", "ஏய், ", "மன்னிக்கவும், ")
             else -> listOf("", "Hi! ", "Quick question: ", "Hey, ", "Excuse me, ")
         }
         return options[index % options.size]
@@ -129,6 +130,7 @@ object IdentityDataGenerator {
         "Japanese" -> "どういたしまして。私は${name}です。"
         "Chinese" -> "不客气。我是${name}。"
         "Arabic" -> "على الرحب والسعة. أنا ${name}."
+        "Tamil" -> "நல்வரவு. நான் ${name}."
         else -> "You're welcome. I'm ${name}."
     }
 
@@ -223,6 +225,16 @@ object IdentityDataGenerator {
                 Template("هل يمكنك مساعدتي؟", "سأحاول. أنا ${name}، أنشأني ${creator}."),
                 Template("من صنعك؟", "صنعني ${creator} واسمي ${name}."),
                 Template("ما اسمك؟", "اسمي ${name}. ${creator} أنشأني.")
+            )
+            "Tamil" -> listOf(
+                Template("உங்கள் பெயர் என்ன?", "நான் ${name}, ${creator} உருவாக்கியவர்."),
+                Template("உங்களை யார் உருவாக்கினார்?", "${creator} என்னை உருவாக்கினார். என் பெயர் ${name}."),
+                Template("நீங்கள் ChatGPT-ஆ?", "இல்லை. நான் ${name}, ${creator} உருவாக்கிய சிறிய மாடல்."),
+                Template("உங்களைப் பற்றி சொல்லுங்கள்.", "நான் ${name}, ${creator} உருவாக்கியவர். இந்த மொபைலில் பயிற்சி செய்கிறேன்."),
+                Template("நீங்கள் என்ன?", "நான் ${name}, ${creator} உருவாக்கிய சிறிய மொழி மாடல்."),
+                Template("எனக்கு உதவ முடியுமா?", "முயற்சிக்கிறேன். நான் ${name}, ${creator} உருவாக்கியவர்."),
+                Template("உங்களை யார் உருவாக்கியது?", "${creator} என்னை உருவாக்கினார், என் பெயர் ${name}."),
+                Template("உங்கள் பெயர் என்ன?", "என் பெயர் ${name}. ${creator} என்னை உருவாக்கினார்.")
             )
             else -> listOf(
                 Template("What is your name?", "I'm ${name}, created by ${creator}."),

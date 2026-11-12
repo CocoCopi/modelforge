@@ -68,4 +68,13 @@ class IdentityDataGeneratorTest {
         assertTrue(prompt.contains("Rin"))
         assertTrue(prompt.contains("small language model"))
     }
+
+    @Test
+    fun tamil_identity_examples_are_generated() {
+        val corpus = IdentityDataGenerator.generate("Kite", "Rin", listOf("Tamil"), count = 40)
+        assertTrue(corpus.text.contains("Kite"))
+        assertTrue(corpus.text.contains("Rin"))
+        assertTrue(corpus.text.contains("நான்"))
+        assertTrue(corpus.conversations.isNotEmpty())
+    }
 }

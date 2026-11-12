@@ -28,15 +28,29 @@ class ArchitectureRegistryTest {
     }
 
     @Test
-    fun planned_architectures_are_visible_but_not_selectable() {
-        val planned = ArchitectureRegistry.all().filter { it.status == ArchitectureStatus.PLANNED }
-        assertTrue(planned.size >= 8)
-        planned.forEach { info ->
-            assertFalse(info.available)
-            assertNotNull(info.unavailableReason)
+    fun exactly_three_architecture_choices_are_visible() {
+        assertEquals(
+            listOf(
+                ArchitectureRegistry.GPT_TEXT,
+                ArchitectureRegistry.NCM_TEXT,
+                ArchitectureRegistry.AI_ARCHITECTURE
+            ),
+            ArchitectureRegistry.all().map { it.id }
+        )
+    }
+
+    @Test
+    fun experimental_architectures_are_selectable_but_planning_only() {
+        val experimental = ArchitectureRegistry.all()
+            .filter { it.status == ArchitectureStatus.EXPERIMENTAL }
+        assertEquals(2, experimental.size)
+        experimental.forEach { info ->
+            assertTrue(info.available)
+            assertFalse(info.trainable)
             assertTrue(info.supportedBits.isEmpty())
             val result = ArchitectureRegistry.derive(info.id, 5_000_000L, 50_000_000L)
             assertEquals(null, result.config)
+            assertTrue(result.warning.orEmpty().contains("Plan only"))
         }
     }
 

@@ -2,6 +2,7 @@ package com.modelforge.app.data
 
 import android.content.Context
 import com.modelforge.app.core.ArchitectureRegistry
+import com.modelforge.app.core.Modality
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -14,6 +15,9 @@ data class WizardDraft(
     val creator: String = "",
     val architectureId: String = ArchitectureRegistry.GPT_TEXT,
     val targetParams: Long = 5_000_000L,
+    val inputModalities: List<Modality> = listOf(Modality.TEXT),
+    val outputModalities: List<Modality> = listOf(Modality.TEXT),
+    val trainingMinutes: Int = 60,
     val contextLength: Int = 0,
     val languages: List<String> = listOf("English"),
     val speedMode: String = "normal",
