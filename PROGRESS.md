@@ -303,3 +303,24 @@ Status: DONE - CI run 43177818802 green (host native tests, JVM tests,
   present.
 - `ResponseModesTest` covers mode normalization, budgets, Instant skipping
   thinking, prompt construction, tag splitting and plain text passthrough.
+
+## v2 Phase 4 - post-training identity check
+
+Status: DONE - CI run 43181598407 green (host native tests, JVM tests,
+`verifyPaparazziDebug`, debug APK and artifacts).
+
+- `core/IdentityCheck.kt` generates 20 questions across the selected languages
+  and scores an answer only when it contains both the model name and creator
+  (case-insensitive). The pass threshold is 80%.
+- The model detail screen runs the check locally against the best checkpoint
+  with low-temperature, short generations, shows the live question count and
+  score, and lists a few failed answers rather than hiding them.
+- Below 80%, "Reinforce identity" raises the training total by 100 steps and
+  sets the identity fraction to at least 8%, then resumes from the existing
+  checkpoint. Training settings now record `identityFraction` and the token
+  cache includes it in its signature.
+- `IdentityCheckTest` covers case-insensitive name+creator matching, the 80%
+  boundary, reinforcement flag and multilingual question generation.
+
+The check measures real generated text; on tiny from-scratch models a low score
+is expected and is reported honestly rather than tuned into a fake pass.
