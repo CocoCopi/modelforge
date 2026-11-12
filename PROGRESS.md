@@ -324,3 +324,18 @@ Status: DONE - CI run 43181598407 green (host native tests, JVM tests,
 
 The check measures real generated text; on tiny from-scratch models a low score
 is expected and is reported honestly rather than tuned into a fake pass.
+
+## v2 Phase 5 - reusable presets
+
+Status: DONE - CI run 43182363626 green (host native tests, JVM tests,
+`verifyPaparazziDebug`, debug APK and artifacts).
+
+- `data/Preset.kt` stores up to 20 named `ModelPreset` records in
+  SharedPreferences, including architecture, size, context, languages, speed,
+  reasoning, tools, persona, compression and the whole training budget.
+- The review step can save the current configuration under a name, apply a
+  preset to the current draft, or delete one. Applying re-derives the model
+  config and reports that datasets are intentionally not part of a preset.
+- Presets never include checkpoints or cached datasets; each model still picks
+  its own data before training. `PresetTest` covers JSON round-tripping and the
+  summary text.
