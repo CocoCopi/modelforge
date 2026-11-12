@@ -173,3 +173,51 @@ training screen; that was fixed without changing behaviour.
 Not yet covered here: device-level Compose UI tests. The wizard and dashboards
 were verified by compilation and the ARM64 debug APK build; an emulator/device
 pass is still useful before release.
+
+## Phase 7 - playground and packed export
+
+Status: DONE - CI run 43157495082 green (host native tests, JVM tests and debug
+APK).
+
+- Playground screen opened from a model's details. It can generate from the
+  full-precision `best.mfck` checkpoint or from a packed `MFPK` file, with a
+  clear source toggle and 2/3/4/8-bit selection.
+- Export runs on a background dispatcher: loads the best checkpoint, calls
+  `NativeModel.savePacked` into `packed/model_q<bits>.mfpk`, reports the real
+  file size, and switches the playground to the packed source. The packed file
+  can be sent through Android's share sheet via the existing FileProvider.
+- Generation controls: prompt (multi-line), max new tokens, temperature, top-k
+  and top-p. Prompt tokens are trimmed to the model context, generation is timed,
+  and the screen shows the decoded text, generated token count and measured
+  tokens/second.
+- Readable guards for missing tokenizer, missing checkpoint or missing packed
+  file; native handles are closed in `finally` blocks after each operation.
+- The model detail screen links into the playground and no longer claims the
+  feature is future work.
+
+Measured facts reused here: packed export sizes/logit agreement are the Phase 5
+numbers. This phase adds the UI and the export/generation wiring; the packed
+inference path itself is the same tested native code.
+
+Not yet covered here: a device-level playground run. The screen compiles into the
+ARM64 debug APK, but actual on-device generation timing and memory will vary by
+phone and should be recorded when a physical device is available.
+
+## Phase 8 - documentation and development release
+
+Status: DONE - CI run 43157828229 green. Prerelease `v1.0.0` published:
+https://github.com/CocoCopi/modelforge/releases/tag/v1.0.0
+
+- README rewritten with the real feature set, install steps, build and test
+  commands, measured results, architecture, dataset/licence rules, privacy and
+  an explicit limitations section. It states that the current APK is debug
+  signed and that the Compose UI has not yet been run on a physical device.
+- Android 13+ now requests `POST_NOTIFICATIONS` at startup so foreground
+  training controls are actually visible when the user grants it.
+- The CI debug APK (19,250,797 bytes, arm64-v8a only) was downloaded from the
+  green run and attached to the prerelease. Release notes repeat the debug
+  signing, device-testing and tiny-model caveats.
+- No release keystore or Play Store metadata is configured. The prerelease is a
+  development build, not a signed production release.
+- Remaining gaps are documented rather than hidden: physical-device UI
+  verification, release signing/proguard, an app icon, and Compose UI tests.
