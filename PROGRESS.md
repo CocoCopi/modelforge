@@ -339,3 +339,20 @@ Status: DONE - CI run 43182363626 green (host native tests, JVM tests,
 - Presets never include checkpoints or cached datasets; each model still picks
   its own data before training. `PresetTest` covers JSON round-tripping and the
   summary text.
+
+## v2 Phase 6 - automatic model card
+
+Status: DONE - CI run 43183528487 green (host native tests, JVM tests,
+`verifyPaparazziDebug`, debug APK and artifacts).
+
+- `data/ModelCard.kt` builds a Markdown card from the manifest: creator,
+  architecture and status, exact parameter layout, languages, training budget,
+  identity fraction, behaviour, datasets with licences/non-commercial flags,
+  intended use, limitations and a licence-responsibility note.
+- The training service writes `MODEL_CARD.md` automatically when a run finishes.
+  Model details can also regenerate and share the card through the existing
+  FileProvider.
+- The card never claims benchmarks or a production quality level; it reports
+  the attached data and the fact that samples are tiny-model samples.
+- `ModelCardTest` checks names, creator, licence, languages, identity fraction
+  and the responsibility note.
