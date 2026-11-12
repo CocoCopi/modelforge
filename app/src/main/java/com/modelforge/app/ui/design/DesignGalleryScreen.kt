@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -55,14 +56,18 @@ fun DesignGalleryScreen(onBack: () -> Unit = {}) {
             Swatch("surface", ForgeColors.surface, ForgeColors.ink)
             Swatch("ink", ForgeColors.ink, ForgeColors.paper)
             Swatch("ember", ForgeColors.ember, ForgeColors.paper)
-            Swatch("verdigris", ForgeColors.verdigris, ForgeColors.paper)
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Swatch("verdigris", ForgeColors.verdigris, ForgeColors.paper)
             Swatch("ochre", ForgeColors.ochre, ForgeColors.ink)
-            Swatch("ochreInk", ForgeColors.ochreInk, ForgeColors.paper)
+            Swatch("ochre ink", ForgeColors.ochreInk, ForgeColors.paper)
             Swatch("error", ForgeColors.error, ForgeColors.paper)
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Swatch("hairline", ForgeColors.hairline, ForgeColors.ink)
-            Swatch("inkMuted", ForgeColors.inkMuted, ForgeColors.paper)
+            Swatch("muted", ForgeColors.inkMuted, ForgeColors.paper)
+            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.weight(1f))
         }
 
         SectionHeading("Type scale", "Fraunces / Instrument Sans / JetBrains Mono")
@@ -73,7 +78,7 @@ fun DesignGalleryScreen(onBack: () -> Unit = {}) {
                 style = MaterialTheme.typography.bodyLarge,
                 color = ForgeColors.ink
             )
-            Text("momentum 0.0042   step 1280/2000   tokens/s 81,442", style = ForgeType.mono, color = ForgeColors.inkMuted)
+            Text("step 1280/2000 · 81,442 tok/s", style = ForgeType.monoSmall, color = ForgeColors.inkMuted)
             SmallCaps("a small caps label")
         }
 
