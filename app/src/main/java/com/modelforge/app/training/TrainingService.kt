@@ -240,7 +240,10 @@ class TrainingService : Service() {
             val dataDir = store.dataDir(modelId)
             val corpusCap = settings.corpusChars.coerceIn(10_000, 4_000_000)
             val identityBudget = if (manifest.creator.isNotBlank()) {
-                IdentityDataGenerator.estimateIdentityFraction(corpusCap)
+                IdentityDataGenerator.estimateIdentityFraction(
+                    corpusCap,
+                    settings.identityFraction.toDouble()
+                )
             } else {
                 0
             }
@@ -573,7 +576,8 @@ class TrainingService : Service() {
                 manifest.creator,
                 manifest.languages.joinToString(","),
                 manifest.behavior.reasoningEnabled.toString(),
-                manifest.behavior.toolCalling.toString()
+                manifest.behavior.toolCalling.toString(),
+                manifest.settings.identityFraction.toString()
             ).joinToString("|")
         )
         TokenCache.load(cacheFile, cacheManifest, signature)?.let { return it }

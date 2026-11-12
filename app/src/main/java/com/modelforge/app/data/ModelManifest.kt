@@ -29,7 +29,8 @@ data class TrainingSettings(
     val sampleEvery: Int = 100,
     val samplingTemperature: Float = 0.8f,
     val corpusChars: Int = 1_500_000,
-    val autoResume: Boolean = true
+    val autoResume: Boolean = true,
+    val identityFraction: Float = 0.04f
 ) {
     companion object {
         fun autoFor(config: ModelConfig): TrainingSettings {

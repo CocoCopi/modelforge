@@ -83,6 +83,20 @@ object IdentityDataGenerator {
         return IdentityCorpus(out.toString(), conversations)
     }
 
+    fun checkQuestions(languages: List<String>, count: Int = 20): List<String> {
+        val selected = languages.map { it.trim() }.filter { it.isNotBlank() }
+            .ifEmpty { listOf("English") }
+            .distinct()
+        val perLanguage = if (selected.size == 1) Int.MAX_VALUE else 5
+        val pool = selected.flatMap { language ->
+            templates("this model", "its creator", language)
+                .map { it.question }
+                .take(perLanguage)
+        }
+        if (pool.isEmpty()) return emptyList()
+        return List(count.coerceAtLeast(1)) { pool[it % pool.size] }
+    }
+
     fun estimateIdentityFraction(corpusChars: Int, fraction: Double = 0.04): Int {
         if (corpusChars <= 0) return 0
         return (corpusChars * fraction.coerceIn(0.03, 0.05)).toInt()

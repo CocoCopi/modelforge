@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.modelforge.app.core.ArchitectureRegistry
 import com.modelforge.app.core.ConfigDeriver
 import com.modelforge.app.core.HardwareDetector
+import com.modelforge.app.core.IdentityCheck
 import com.modelforge.app.core.ModelConfig
 import com.modelforge.app.core.ResponseModes
 import com.modelforge.app.data.DatasetMixEntry
@@ -115,6 +116,25 @@ data class PlaygroundState(
     }
 }
 
+data class IdentityAnswer(
+    val question: String,
+    val response: String,
+    val passed: Boolean
+)
+
+data class IdentityCheckState(
+    val modelId: String = "",
+    val busy: Boolean = false,
+    val answers: List<IdentityAnswer> = emptyList(),
+    val error: String? = null
+) {
+    val passed: Int get() = answers.count { it.passed }
+    val total: Int get() = answers.size
+    val score: Double get() = if (total <= 0) 0.0 else passed.toDouble() / total
+    val completed: Boolean get() = !busy && total > 0 && error == null
+    val needsReinforce: Boolean get() = completed && score < IdentityCheck.PASS_THRESHOLD
+}
+
 class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
 
     private val store = ModelStore(app)
@@ -177,6 +197,9 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _playground = MutableStateFlow(PlaygroundState())
     val playground: StateFlow<PlaygroundState> = _playground.asStateFlow()
+
+    private val _identityCheck = MutableStateFlow(IdentityCheckState())
+    val identityCheck: StateFlow<IdentityCheckState> = _identityCheck.asStateFlow()
 
     fun openGallery() { _screen.value = Screen.Gallery }
 
@@ -639,6 +662,106 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             reasoningEnabled = manifest.behavior.reasoningEnabled
         )
         _screen.value = Screen.Playground(id)
+    }
+
+    fun checkIdentity(id: String) {
+        if (_identityCheck.value.busy) return
+        val manifest = store.loadManifest(id) ?: return
+        if (manifest.creator.isBlank()) {
+            _identityCheck.value = IdentityCheckState(
+                modelId = id,
+                error = "This model has no creator name, so identity cannot be checked."
+            )
+            return
+        }
+        val tokenizerFile = store.tokenizerFile(id)
+        if (!tokenizerFile.exists()) {
+            _identityCheck.value = IdentityCheckState(
+                modelId = id,
+                error = "Train this model before checking its identity."
+            )
+            return
+        }
+        val checkpoint = store.bestCheckpoint(id)
+        if (!checkpoint.exists()) {
+            _identityCheck.value = IdentityCheckState(
+                modelId = id,
+                error = "No best checkpoint yet. Finish a training run first."
+            )
+            return
+        }
+        _identityCheck.value = IdentityCheckState(modelId = id, busy = true)
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val tokenizer = BpeTokenizer.load(tokenizerFile)
+                val model = NativeModel.load(checkpoint.absolutePath)
+                    ?: throw IllegalStateException("Could not load the best checkpoint.")
+                try {
+                    val questions = IdentityCheck.questions(manifest.languages)
+                    if (questions.isEmpty()) {
+                        throw IllegalStateException("No identity questions were generated.")
+                    }
+                    val answers = ArrayList<IdentityAnswer>(questions.size)
+                    for (question in questions) {
+                        val promptText = "User: $question\nAssistant:"
+                        val encoded = tokenizer.encode(promptText)
+                        if (encoded.isEmpty()) continue
+                        val context = (model.config.contextLength - 4).coerceAtLeast(1)
+                        val trimmed = encoded.takeLast(context).toIntArray()
+                        val generated = model.generate(
+                            trimmed,
+                            24,
+                            0.2f,
+                            20,
+                            0.9f,
+                            System.nanoTime()
+                        )
+                        val response = tokenizer.decode(generated)
+                        answers += IdentityAnswer(
+                            question = question,
+                            response = response.trim(),
+                            passed = IdentityCheck.isIdentityAnswer(
+                                manifest.name,
+                                manifest.creator,
+                                response
+                            )
+                        )
+                        _identityCheck.value = IdentityCheckState(
+                            modelId = id,
+                            busy = true,
+                            answers = answers.toList()
+                        )
+                    }
+                    _identityCheck.value = IdentityCheckState(
+                        modelId = id,
+                        answers = answers
+                    )
+                } finally {
+                    model.close()
+                }
+            } catch (t: Throwable) {
+                _identityCheck.value = IdentityCheckState(
+                    modelId = id,
+                    error = t.message ?: "Identity check failed."
+                )
+            }
+        }
+    }
+
+    fun reinforceIdentity(id: String) {
+        val manifest = store.loadManifest(id) ?: return
+        val live = store.loadLiveState(id)
+        if (live?.isActive == true) return
+        val updated = manifest.copy(
+            settings = manifest.settings.copy(
+                steps = manifest.settings.steps + 100,
+                identityFraction = manifest.settings.identityFraction.coerceAtLeast(0.08f)
+            )
+        )
+        store.saveManifest(updated)
+        refreshModels()
+        _identityCheck.value = IdentityCheckState()
+        openTraining(id)
     }
 
     fun packedFile(id: String, bits: Int): File = store.packedFile(id, bits)

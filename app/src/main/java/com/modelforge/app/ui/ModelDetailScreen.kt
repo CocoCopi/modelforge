@@ -11,6 +11,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -31,6 +32,7 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
     val manifest = remember(modelId) { vm.manifest(modelId) }
     var state by remember(modelId) { mutableStateOf(vm.liveState(modelId)) }
     var confirmDelete by remember { mutableStateOf(false) }
+    val identity by vm.identityCheck.collectAsState()
 
     LaunchedEffect(modelId) {
         while (true) {
@@ -132,6 +134,76 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
                     style = ForgeType.mono,
                     color = if (sample.isBlank()) ForgeColors.inkMuted else ForgeColors.ink
                 )
+            }
+
+            val identityHere = identity.modelId == modelId
+            SectionCard("Identity check") {
+                Text(
+                    "Ask 20 identity questions and measure how often the model names " +
+                        "itself and its creator. Runs locally on the best checkpoint.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ForgeColors.inkMuted
+                )
+                ForgeButton(
+                    if (identityHere && identity.busy) {
+                        "Checking ${identity.total}/20…"
+                    } else {
+                        "Run 20-question identity check"
+                    },
+                    onClick = { vm.checkIdentity(modelId) },
+                    enabled = !active && !(identityHere && identity.busy) &&
+                        checkpoints.second > 0,
+                    modifier = Modifier.fillMaxWidth(),
+                    primary = true
+                )
+                if (checkpoints.second == 0) {
+                    Text(
+                        "Train this model first; there is no best checkpoint to test.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ForgeColors.ochreInk
+                    )
+                }
+                if (identityHere && identity.error != null) {
+                    Text(
+                        identity.error.orEmpty(),
+                        color = ForgeColors.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                if (identityHere && identity.total > 0) {
+                    InfoRow(
+                        "Score",
+                        "${identity.passed} / ${identity.total} " +
+                            "(${String.format("%.0f", identity.score * 100)}%)",
+                        if (identity.needsReinforce) ForgeColors.ochreInk else ForgeColors.verdigris
+                    )
+                }
+                if (identityHere && identity.needsReinforce) {
+                    Text(
+                        "Below 80%. One-tap reinforce adds 100 steps with at least 8% " +
+                            "identity data, resuming from the current checkpoint.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ForgeColors.ochreInk
+                    )
+                    ForgeOutlineButton(
+                        "Reinforce identity",
+                        onClick = { vm.reinforceIdentity(modelId) },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !active
+                    )
+                }
+                if (identityHere && identity.completed) {
+                    identity.answers.filter { !it.passed }.take(3).forEach { answer ->
+                        Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                            Text(answer.question, style = MaterialTheme.typography.bodySmall)
+                            Text(
+                                answer.response.ifBlank { "(empty response)" },
+                                style = ForgeType.mono,
+                                color = ForgeColors.inkMuted
+                            )
+                        }
+                    }
+                }
             }
 
             SectionCard("Actions") {
