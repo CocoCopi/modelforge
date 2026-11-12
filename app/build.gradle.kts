@@ -5,6 +5,10 @@ plugins {
     id("app.cash.paparazzi")
 }
 
+val ciKeystore = System.getenv("MF_KEYSTORE_PATH")
+    ?.let { file(it) }
+    ?.takeIf { it.exists() }
+
 android {
     namespace = "com.modelforge.app"
     compileSdk = 34
@@ -31,8 +35,27 @@ android {
         }
     }
 
+    signingConfigs {
+        if (ciKeystore != null) {
+            create("ci") {
+                storeFile = ciKeystore
+                storePassword = System.getenv("MF_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("MF_KEY_ALIAS") ?: "modelforge"
+                keyPassword = System.getenv("MF_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            if (ciKeystore != null) {
+                signingConfig = signingConfigs.getByName("ci")
+            }
+        }
         release {
+            if (ciKeystore != null) {
+                signingConfig = signingConfigs.getByName("ci")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
