@@ -62,6 +62,7 @@ fun TrainingScreen(vm: ModelForgeViewModel, modelId: String) {
             return@ForgeScaffold
         }
 
+        val snapshot = state
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -69,22 +70,22 @@ fun TrainingScreen(vm: ModelForgeViewModel, modelId: String) {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            ProgressCard(manifest, state)
-            if (state != null) {
-                MetricsRow(state)
+            ProgressCard(manifest, snapshot)
+            if (snapshot != null) {
+                MetricsRow(snapshot)
             }
             SectionCard("Loss curve") {
                 LossChart(
-                    history = state?.lossHistory.orEmpty(),
+                    history = snapshot?.lossHistory.orEmpty(),
                     modifier = Modifier.fillMaxWidth().height(160.dp)
                 )
             }
-            if (state != null) {
-                DeviceCard(state)
-                if (state.sample.isNotBlank()) {
+            if (snapshot != null) {
+                DeviceCard(snapshot)
+                if (snapshot.sample.isNotBlank()) {
                     SectionCard("Sample output") {
                         Text(
-                            state.sample,
+                            snapshot.sample,
                             style = MaterialTheme.typography.bodyMedium,
                             fontFamily = FontFamily.Monospace,
                             modifier = Modifier
@@ -101,10 +102,10 @@ fun TrainingScreen(vm: ModelForgeViewModel, modelId: String) {
                     }
                 }
             }
-            if (state?.error != null) {
-                Text(state!!.error.orEmpty(), color = ForgeDanger, style = MaterialTheme.typography.bodyMedium)
+            if (snapshot?.error != null) {
+                Text(snapshot?.error.orEmpty(), color = ForgeDanger, style = MaterialTheme.typography.bodyMedium)
             }
-            ControlsCard(vm, modelId, manifest, state)
+            ControlsCard(vm, modelId, manifest, snapshot)
         }
     }
 }
