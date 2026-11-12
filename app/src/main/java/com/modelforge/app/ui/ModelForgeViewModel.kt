@@ -540,7 +540,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
 
     fun removeDataset(index: Int) {
         updateWizard { state ->
-            val entry = state.datasets.getOrNull(index) ?: return@update state
+            val entry = state.datasets.getOrNull(index) ?: return@updateWizard state
             val id = state.modelId
             if (id != null) {
                 val file = File(store.dataDir(id), entry.cacheFile)
