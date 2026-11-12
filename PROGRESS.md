@@ -381,3 +381,48 @@ Status: DONE - CI run 43210808386 green (host native tests, JVM tests,
   because some vendors still kill foreground work without it.
 - `RecoveryPolicyTest` covers interval scaling, due checks and little-endian
   checkpoint step reading.
+
+## v2 Phase 8 - NVIDIA AI architect and the three-path wizard
+
+Status: DONE - CI run 43260935632 green (host native tests, JVM tests,
+`verifyPaparazziDebug`, debug APK and artifacts).
+
+- `data/ai/NvidiaClient.kt` streams chat completions from
+  `https://integrate.api.nvidia.com/v1/chat/completions` with
+  `minimaxai/minimax-m3.1-flash`, parses `data:` SSE frames and `[DONE]`, and
+  returns the accumulated answer. The API key is read from
+  `SecureTokenStore.nvidiaToken`; it is never logged, written to disk in
+  plaintext, or included in model cards.
+- A key dialog is reachable from Home and the AI design step. Saving fails
+  loudly if encrypted storage is unavailable instead of silently dropping the
+  key.
+- `data/ai/AiPlanner.kt` builds an explicit architect prompt from the draft:
+  name, creator, architecture, parameter count, input/output modalities,
+  languages (including Tamil), training minutes, context, speed, reasoning,
+  tools, persona, compression and current datasets. The model must return one
+  JSON object with an overview, analogy, training settings, per-purpose dataset
+  suggestions (general, identity, reasoning, tool calls, languages, modalities)
+  with rows, mix weight, licence and commercial-use flag, plus notes/warnings.
+- Parsing accepts bare or fenced JSON and sanitizes every bound: steps 100-2000,
+  batch 1-32, sequence 32-1024, learning rate 1e-5..1e-2, rows 100-5000 and
+  weights 0.1-5. Non-commercial or unconfirmed suggestions get a visible
+  warning. Applying a plan updates the draft's steps, batch, sequence, learning
+  rate and warmup; dataset suggestions are inspected against the real Hugging
+  Face API before use, so hallucinated ids fail visibly.
+- The registry now exposes exactly three choices: traditional transformer
+  (stable and trainable), NCM (planning-only) and a new AI-designed
+  architecture (planning-only). Both experimental paths are selectable but
+  return no native config, so the wizard cannot claim to train an engine that
+  does not exist.
+- The wizard adds an interactive input/output modality step (text, image,
+  audio, video, documents), a 15-480 minute training-time slider, an AI design
+  step with streaming output and dataset inspection, and Tamil in the language
+  list and identity templates. Native training remains honestly gated to
+  text-to-text on the traditional transformer.
+- Tests cover the planner prompt, fenced/plain JSON parsing, clamping,
+  commercial-licence warnings, SSE delta parsing, the three-architecture
+  registry, and Tamil identity generation.
+
+Limitations: the real NVIDIA endpoint was not called in CI because no API key
+is stored there. NCM and AI-designed architectures still need native engines;
+the planner designs their data and settings but cannot train them yet.
