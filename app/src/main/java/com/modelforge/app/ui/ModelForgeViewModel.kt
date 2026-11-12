@@ -3,6 +3,7 @@ package com.modelforge.app.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.modelforge.app.core.ArchitectureRegistry
 import com.modelforge.app.core.ConfigDeriver
 import com.modelforge.app.core.HardwareDetector
 import com.modelforge.app.core.ModelConfig
@@ -12,6 +13,8 @@ import com.modelforge.app.data.ModelStore
 import com.modelforge.app.data.SecureTokenStore
 import com.modelforge.app.data.TrainingLiveState
 import com.modelforge.app.data.TrainingSettings
+import com.modelforge.app.data.WizardDraft
+import com.modelforge.app.data.WizardDraftStore
 import com.modelforge.app.data.hf.DatasetStructure
 import com.modelforge.app.data.hf.DownloadStats
 import com.modelforge.app.data.hf.HfClient
@@ -42,7 +45,16 @@ sealed class Screen {
 data class WizardState(
     val modelId: String? = null,
     val name: String = "My first model",
+    val creator: String = "",
+    val architectureId: String = ArchitectureRegistry.GPT_TEXT,
     val targetParams: Long = 5_000_000L,
+    val contextChoice: Int = 0,
+    val languages: Set<String> = setOf("English"),
+    val speedMode: String = "normal",
+    val reasoningEnabled: Boolean = false,
+    val reasoningRoom: Int = 256,
+    val toolCalling: Boolean = false,
+    val persona: String = "",
     val config: ModelConfig? = null,
     val step: Int = 0,
     val bits: Int = 4,
@@ -70,7 +82,9 @@ data class WizardState(
     val error: String? = null
 ) {
     val canStart: Boolean
-        get() = modelId != null && config != null && name.isNotBlank() && datasets.isNotEmpty()
+        get() = modelId != null && config != null && name.isNotBlank() &&
+            creator.isNotBlank() && datasets.isNotEmpty() &&
+            ArchitectureRegistry.info(architectureId).available
 }
 
 data class PlaygroundState(
@@ -99,6 +113,7 @@ data class PlaygroundState(
 class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
 
     private val store = ModelStore(app)
+    private val draftStore = WizardDraftStore(app)
     private val tokenStore = SecureTokenStore(app)
     private val hf = HfRepository(HfClient.create { tokenStore.token })
 
@@ -119,6 +134,41 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _notice = MutableStateFlow<String?>(null)
     val notice: StateFlow<String?> = _notice.asStateFlow()
+
+    private fun updateWizard(transform: (WizardState) -> WizardState) {
+        _wizard.value = transform(_wizard.value).also(::persistDraft)
+    }
+
+    private fun persistDraft(state: WizardState) {
+        val id = state.modelId ?: return
+        draftStore.save(
+            WizardDraft(
+                modelId = id,
+                name = state.name,
+                creator = state.creator,
+                architectureId = state.architectureId,
+                targetParams = state.targetParams,
+                contextLength = state.contextChoice,
+                languages = state.languages.toList(),
+                speedMode = state.speedMode,
+                reasoningEnabled = state.reasoningEnabled,
+                reasoningRoom = state.reasoningRoom,
+                toolCalling = state.toolCalling,
+                persona = state.persona,
+                bits = state.bits,
+                steps = state.steps,
+                batchSize = state.batchSize,
+                seqLength = state.seqLength,
+                learningRate = state.learningRate,
+                warmupSteps = state.warmupSteps,
+                checkpointEvery = state.checkpointEvery,
+                sampleEvery = state.sampleEvery,
+                corpusChars = state.corpusChars,
+                datasets = state.datasets,
+                step = state.step
+            )
+        )
+    }
 
     private val _playground = MutableStateFlow(PlaygroundState())
     val playground: StateFlow<PlaygroundState> = _playground.asStateFlow()
@@ -145,39 +195,154 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun startNewModel() {
-        val target = defaultTarget()
-        val config = ConfigDeriver.derive(
+        val draft = draftStore.load()
+        val target = draft?.targetParams ?: defaultTarget()
+        val architectureId = draft?.architectureId ?: ArchitectureRegistry.GPT_TEXT
+        val context = draft?.contextLength?.takeIf { it > 0 }
+        val config = ArchitectureRegistry.derive(
+            architectureId,
             target,
-            ConfigDeriver.Options(maxParams = maxTargetParams)
+            maxTargetParams,
+            context
         ).config
-        _wizard.value = WizardState(
-            modelId = store.newModelId("model"),
-            targetParams = target
-        ).withSettings(config)
+        _wizard.value = if (draft != null && config != null) {
+            WizardState(
+                modelId = draft.modelId.ifBlank { store.newModelId("model") },
+                name = draft.name,
+                creator = draft.creator,
+                architectureId = architectureId,
+                targetParams = target,
+                contextChoice = draft.contextLength,
+                languages = draft.languages.toSet(),
+                speedMode = draft.speedMode,
+                reasoningEnabled = draft.reasoningEnabled,
+                reasoningRoom = draft.reasoningRoom,
+                toolCalling = draft.toolCalling,
+                persona = draft.persona,
+                bits = draft.bits,
+                steps = draft.steps,
+                batchSize = draft.batchSize,
+                seqLength = draft.seqLength,
+                learningRate = draft.learningRate,
+                warmupSteps = draft.warmupSteps,
+                checkpointEvery = draft.checkpointEvery,
+                sampleEvery = draft.sampleEvery,
+                corpusChars = draft.corpusChars,
+                datasets = draft.datasets,
+                step = draft.step.coerceIn(0, WizardStep.lastIndex),
+                config = config
+            )
+        } else {
+            val fresh = ConfigDeriver.derive(
+                target,
+                ConfigDeriver.Options(maxParams = maxTargetParams)
+            ).config.copy(architectureId = ArchitectureRegistry.GPT_TEXT)
+            WizardState(
+                modelId = store.newModelId("model"),
+                targetParams = target
+            ).withSettings(fresh)
+        }
         _notice.value = null
         _screen.value = Screen.Wizard
     }
 
     fun updateName(value: String) {
-        _wizard.update { it.copy(name = value) }
+        updateWizard { it.copy(name = value) }
+    }
+
+    fun updateCreator(value: String) {
+        updateWizard { it.copy(creator = value) }
+    }
+
+    fun updateArchitecture(id: String) {
+        val info = ArchitectureRegistry.info(id)
+        if (!info.available) {
+            updateWizard { it.copy(error = info.unavailableReason ?: "This architecture is not available.") }
+            return
+        }
+        val state = _wizard.value
+        val config = ArchitectureRegistry.derive(
+            id,
+            state.targetParams,
+            maxTargetParams,
+            state.contextChoice.takeIf { it > 0 }
+        ).config
+        updateWizard {
+            it.copy(
+                architectureId = id,
+                config = config,
+                bits = if (it.bits in info.supportedBits) it.bits else info.supportedBits.firstOrNull() ?: 4,
+                error = null
+            )
+        }
     }
 
     fun updateTarget(target: Long) {
         val capped = target.coerceIn(1_000_000L, maxTargetParams)
-        val config = ConfigDeriver.derive(
+        val state = _wizard.value
+        val config = ArchitectureRegistry.derive(
+            state.architectureId,
             capped,
-            ConfigDeriver.Options(maxParams = maxTargetParams)
+            maxTargetParams,
+            state.contextChoice.takeIf { it > 0 }
         ).config
-        _wizard.update { it.copy(targetParams = capped).withSettings(config) }
+        updateWizard {
+            if (config == null) it.copy(targetParams = capped)
+            else it.copy(targetParams = capped).withSettings(config)
+        }
+    }
+
+    fun updateContext(length: Int) {
+        val state = _wizard.value
+        if (length <= 0) return
+        val config = ArchitectureRegistry.derive(
+            state.architectureId,
+            state.targetParams,
+            maxTargetParams,
+            length
+        ).config
+        updateWizard {
+            it.copy(contextChoice = length, config = config ?: it.config, error = null)
+        }
+    }
+
+    fun toggleLanguage(language: String) {
+        updateWizard { state ->
+            val next = if (language in state.languages) state.languages - language else state.languages + language
+            state.copy(languages = next, error = null)
+        }
+    }
+
+    fun updateSpeedMode(mode: String) {
+        if (mode !in setOf("instant", "normal", "extra")) return
+        updateWizard { it.copy(speedMode = mode) }
+    }
+
+    fun updateReasoning(enabled: Boolean) {
+        updateWizard { it.copy(reasoningEnabled = enabled) }
+    }
+
+    fun updateReasoningRoom(tokens: Int) {
+        updateWizard { it.copy(reasoningRoom = tokens.coerceIn(64, 2048)) }
+    }
+
+    fun updateToolCalling(enabled: Boolean) {
+        updateWizard { it.copy(toolCalling = enabled) }
+    }
+
+    fun updatePersona(value: String) {
+        updateWizard { it.copy(persona = value.take(600)) }
     }
 
     fun updateBits(bits: Int) {
-        _wizard.update { it.copy(bits = bits) }
+        val supported = ArchitectureRegistry.supportedBits(_wizard.value.architectureId)
+        if (bits !in supported) return
+        updateWizard { it.copy(bits = bits) }
     }
 
     fun updateSteps(value: Int) {
         val steps = value.coerceIn(100, 2000)
-        _wizard.update {
+        updateWizard {
             it.copy(
                 steps = steps,
                 warmupSteps = maxOf(10, steps / 20),
@@ -191,11 +356,11 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun nextStep() {
-        _wizard.update { it.copy(step = (it.step + 1).coerceAtMost(3), error = null) }
+        updateWizard { it.copy(step = (it.step + 1).coerceAtMost(WizardStep.lastIndex), error = null) }
     }
 
     fun previousStep() {
-        _wizard.update { it.copy(step = (it.step - 1).coerceAtLeast(0), error = null) }
+        updateWizard { it.copy(step = (it.step - 1).coerceAtLeast(0), error = null) }
     }
 
     fun wizardBack() {
@@ -207,6 +372,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun discardWizard() {
+        draftStore.clear()
         val id = _wizard.value.modelId
         if (id != null && store.loadManifest(id) == null) {
             store.deleteModel(id)
@@ -217,20 +383,20 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun updateSearchQuery(value: String) {
-        _wizard.update { it.copy(searchQuery = value) }
+        updateWizard { it.copy(searchQuery = value) }
     }
 
     fun searchDatasets() {
         val query = _wizard.value.searchQuery.trim()
         if (query.length < 2) {
-            _wizard.update { it.copy(error = "Type at least two characters to search.") }
+            updateWizard { it.copy(error = "Type at least two characters to search.") }
             return
         }
         viewModelScope.launch {
-            _wizard.update { it.copy(searching = true, error = null) }
+            updateWizard { it.copy(searching = true, error = null) }
             try {
                 val results = hf.search(query, limit = 25)
-                _wizard.update {
+                updateWizard {
                     it.copy(
                         searchResults = results,
                         searching = false,
@@ -238,7 +404,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             } catch (t: Throwable) {
-                _wizard.update {
+                updateWizard {
                     it.copy(searching = false, error = t.message ?: "Dataset search failed.")
                 }
             }
@@ -246,7 +412,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun selectDataset(summary: HfDatasetSummary) {
-        _wizard.update {
+        updateWizard {
             it.copy(
                 selectedDataset = summary,
                 structure = null,
@@ -262,7 +428,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val structure = hf.structure(summary.id)
                 val first = structure.configs.firstOrNull()
-                _wizard.update {
+                updateWizard {
                     it.copy(
                         structure = structure,
                         configName = first?.name.orEmpty(),
@@ -275,7 +441,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             } catch (t: Throwable) {
-                _wizard.update {
+                updateWizard {
                     it.copy(datasetBusy = false, error = t.message ?: "Could not inspect this dataset.")
                 }
             }
@@ -283,7 +449,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun selectConfig(name: String) {
-        _wizard.update { state ->
+        updateWizard { state ->
             val cfg = state.structure?.configs?.firstOrNull { it.name == name }
             state.copy(
                 configName = name,
@@ -294,22 +460,22 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun selectSplit(name: String) {
-        _wizard.update { it.copy(splitName = name) }
+        updateWizard { it.copy(splitName = name) }
     }
 
     fun toggleColumn(name: String) {
-        _wizard.update { state ->
+        updateWizard { state ->
             val columns = if (name in state.columns) state.columns - name else state.columns + name
             state.copy(columns = columns)
         }
     }
 
     fun updateRows(value: Int) {
-        _wizard.update { it.copy(rows = value.coerceIn(100, 5000)) }
+        updateWizard { it.copy(rows = value.coerceIn(100, 5000)) }
     }
 
     fun updateWeight(value: Float) {
-        _wizard.update { it.copy(weight = value.coerceIn(0.1f, 5f)) }
+        updateWizard { it.copy(weight = value.coerceIn(0.1f, 5f)) }
     }
 
     fun downloadSelectedDataset() {
@@ -317,7 +483,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         val modelId = state.modelId ?: return
         val summary = state.selectedDataset ?: return
         if (state.configName.isBlank() || state.splitName.isBlank() || state.columns.isEmpty()) {
-            _wizard.update {
+            updateWizard {
                 it.copy(error = "Choose a config, split and at least one text column.")
             }
             return
@@ -325,7 +491,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         val index = state.datasets.size
         val destination = File(store.dataDir(modelId), "dataset_$index.txt")
         viewModelScope.launch {
-            _wizard.update { it.copy(datasetBusy = true, datasetProgress = null, error = null) }
+            updateWizard { it.copy(datasetBusy = true, datasetProgress = null, error = null) }
             try {
                 val stats = hf.downloadText(
                     datasetId = summary.id,
@@ -336,7 +502,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                     maxBytes = (state.rows.toLong() * 4096L).coerceAtLeast(1_000_000L),
                     destination = destination
                 ) { progress ->
-                    _wizard.update { it.copy(datasetProgress = progress) }
+                    updateWizard { it.copy(datasetProgress = progress) }
                 }
                 val license = summary.resolvedLicense()
                 val entry = DatasetMixEntry(
@@ -351,7 +517,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                     license = license,
                     nonCommercial = isLikelyNonCommercial(license)
                 )
-                _wizard.update {
+                updateWizard {
                     it.copy(
                         datasets = it.datasets + entry,
                         selectedDataset = null,
@@ -365,7 +531,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             } catch (t: Throwable) {
-                _wizard.update {
+                updateWizard {
                     it.copy(datasetBusy = false, error = t.message ?: "Download failed.")
                 }
             }
@@ -373,7 +539,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun removeDataset(index: Int) {
-        _wizard.update { state ->
+        updateWizard { state ->
             val entry = state.datasets.getOrNull(index) ?: return@update state
             val id = state.modelId
             if (id != null) {
@@ -390,7 +556,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         val config = state.config
         if (id == null || config == null) return
         if (state.datasets.isEmpty()) {
-            _wizard.update { it.copy(error = "Add at least one dataset before training.") }
+            updateWizard { it.copy(error = "Add at least one dataset before training.") }
             return
         }
         val bits = state.bits
@@ -408,20 +574,34 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         val manifest = ModelManifest(
             id = id,
             name = state.name.trim().ifBlank { "My model" },
+            creator = state.creator.trim(),
             createdAt = System.currentTimeMillis(),
-            config = config.copy(bits = bits, qat = bits in 2..8),
+            config = config.copy(
+                bits = bits,
+                qat = bits in 2..8,
+                architectureId = state.architectureId
+            ),
             settings = settings,
             datasets = state.datasets,
-            tokenizerTrained = false
+            tokenizerTrained = false,
+            languages = state.languages.toList(),
+            behavior = com.modelforge.app.data.BehaviorConfig(
+                speedMode = state.speedMode,
+                reasoningEnabled = state.reasoningEnabled,
+                reasoningRoom = state.reasoningRoom,
+                toolCalling = state.toolCalling,
+                persona = state.persona.trim()
+            )
         )
         store.saveManifest(manifest)
         runCatching { TrainingService.start(getApplication(), id) }
             .onFailure { t ->
-                _wizard.update {
+                updateWizard {
                     it.copy(error = t.message ?: "Could not start the training service.")
                 }
                 return
             }
+        draftStore.clear()
         refreshModels()
         _wizard.value = WizardState()
         _screen.value = Screen.Training(id)

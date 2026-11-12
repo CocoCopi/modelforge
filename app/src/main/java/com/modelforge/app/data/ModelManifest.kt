@@ -71,14 +71,26 @@ data class TrainingSettings(
 }
 
 @Serializable
+data class BehaviorConfig(
+    val speedMode: String = "normal",
+    val reasoningEnabled: Boolean = false,
+    val reasoningRoom: Int = 256,
+    val toolCalling: Boolean = false,
+    val persona: String = ""
+)
+
+@Serializable
 data class ModelManifest(
     val id: String,
     val name: String,
+    val creator: String = "",
     val createdAt: Long,
     val config: ModelConfig,
     val settings: TrainingSettings,
     val datasets: List<DatasetMixEntry> = emptyList(),
-    val tokenizerTrained: Boolean = false
+    val tokenizerTrained: Boolean = false,
+    val languages: List<String> = emptyList(),
+    val behavior: BehaviorConfig = BehaviorConfig()
 )
 
 @Serializable

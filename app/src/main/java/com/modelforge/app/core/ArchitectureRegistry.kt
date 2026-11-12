@@ -90,9 +90,12 @@ object ArchitectureRegistry {
         )
 
         override fun derive(targetParams: Long, maxParams: Long, contextLength: Int?): ArchitectureDerivation {
+            val options = ConfigDeriver.Options(maxParams = maxParams)
             val result = ConfigDeriver.derive(
                 targetParams,
-                ConfigDeriver.Options(maxParams = maxParams)
+                if (contextLength != null) {
+                    options.copy(contextCandidates = intArrayOf(contextLength))
+                } else options
             )
             val config = result.config.copy(architectureId = info.id)
             return ArchitectureDerivation(
