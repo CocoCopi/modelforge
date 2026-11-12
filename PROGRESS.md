@@ -454,3 +454,33 @@ Status: DONE - CI run 43269569997 green.
   the R8 mapping alongside the debug APK.
 - Release APK verified: package `com.modelforge.app`, version 2.0.0, minSdk 26,
   arm64-v8a, v2 signature, debuggable false, cleartext disabled.
+
+## Production release v2.0.1 - AI request feedback
+
+Status: DONE - CI runs 43274899079 and 43276120628 green.
+
+- Fixed the "Designing..." dead-end in the AI architect. The network call had a
+  five-minute read timeout with no visible progress when the model reasoned
+  before emitting content or did not stream.
+- The AI step now displays elapsed seconds and the number of NVIDIA stream
+  events from the first moment, and provides **Cancel request**, which cancels
+  the coroutine and the active OkHttp call immediately.
+- Streaming now has a 90-second read timeout, a 180-second total call timeout,
+  and a non-streaming JSON fallback. HTTP 401/403/404/429 responses explain the
+  likely cause. If no plan text arrives, the app reports that instead of hanging.
+- Request tuning: `max_tokens` 8192, `temperature` 0.4, compact prompt with at
+  most 8 dataset suggestions. Streaming still uses seed 0, top-p 0.95 and the
+  same NVIDIA model and endpoint.
+- Parser now handles `message.content`, `text`, JSON-array content and
+  `reasoning_content`; tests cover non-streaming content and reasoning frames.
+- Version `2.0.1` (`versionCode 3`), signed with the stable key so it updates
+  over v2.0.0 without uninstalling. Release:
+  https://github.com/CocoCopi/modelforge/releases/tag/v2.0.1
+- APK SHA-256:
+  `cd2cf605d29e169b92319df09d08799545983db21f47a5f6bd4caf7bf2a64643`
+- AAB SHA-256:
+  `1958ec421de70931ae85eead3b38a418e3bd562b616ff214f46133b65571fe9d`
+
+Limitations: the NVIDIA endpoint is still not called in CI because no API key
+is available there. If the new UI reports a specific HTTP error or a no-text
+completion, that is the next diagnostic to investigate.
