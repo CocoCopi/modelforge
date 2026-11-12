@@ -20,6 +20,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -49,6 +50,7 @@ import com.modelforge.app.ui.design.StatusTag
 import com.modelforge.app.ui.design.WizardRuler
 import com.modelforge.app.ui.theme.ForgeColors
 import com.modelforge.app.ui.theme.ForgeType
+import kotlinx.coroutines.delay
 
 private val languageChoices = listOf(
     "English", "Spanish", "French", "German", "Portuguese",
@@ -313,6 +315,17 @@ private fun AiPlanStep(vm: ModelForgeViewModel, state: WizardState) {
     val ai by vm.aiPlanner.collectAsState()
     val keyPresent by vm.aiKeyPresent.collectAsState()
     var showKey by remember { mutableStateOf(false) }
+    var elapsed by remember { mutableStateOf(0L) }
+    LaunchedEffect(ai.busy, ai.startedAt) {
+        if (!ai.busy) {
+            elapsed = 0L
+        } else {
+            while (true) {
+                elapsed = (System.currentTimeMillis() - ai.startedAt) / 1000L
+                delay(1000)
+            }
+        }
+    }
     SectionCard("NVIDIA architect") {
         LedgerStat("api key", if (keyPresent) "saved securely" else "not set")
         Text(
@@ -346,13 +359,33 @@ private fun AiPlanStep(vm: ModelForgeViewModel, state: WizardState) {
         ai.error?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = ForgeColors.error)
         }
-        if (ai.busy && ai.streaming.isNotBlank()) {
+        if (ai.busy) {
             Hairline()
-            SmallCaps("STREAMING")
             Text(
-                ai.streaming.takeLast(1200),
+                "Request sent · ${elapsed}s elapsed · ${ai.events} stream events",
                 style = ForgeType.monoSmall,
-                color = ForgeColors.inkMuted
+                color = ForgeColors.verdigris
+            )
+            if (ai.streaming.isBlank()) {
+                Text(
+                    "Waiting for NVIDIA's first token. The model may reason silently first; " +
+                        "this usually takes 10-60 seconds.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ForgeColors.inkMuted
+                )
+            } else {
+                SmallCaps("STREAMING")
+                Text(
+                    ai.streaming.takeLast(1200),
+                    style = ForgeType.monoSmall,
+                    color = ForgeColors.inkMuted
+                )
+            }
+            ForgeOutlineButton(
+                "Cancel request",
+                onClick = vm::cancelAiPlan,
+                modifier = Modifier.fillMaxWidth(),
+                tint = ForgeColors.error
             )
         }
     }

@@ -47,6 +47,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.UUID
@@ -115,6 +116,8 @@ data class AiPlannerState(
     val streaming: String = "",
     val plan: AiPlan? = null,
     val applied: Boolean = false,
+    val startedAt: Long = 0L,
+    val events: Int = 0,
     val error: String? = null
 )
 
@@ -172,6 +175,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     private val tokenStore = SecureTokenStore(app)
     private val hf = HfRepository(HfClient.create { tokenStore.token })
     private val nvidia = NvidiaClient()
+    private var aiJob: kotlinx.coroutines.Job? = null
 
     val hardware = HardwareDetector.detect(app)
     val maxTargetParams: Long = hardware.maxTrainableParams
@@ -458,21 +462,54 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             bits = state.bits,
             currentDatasets = state.datasets.map { it.datasetId }
         )
-        _aiPlanner.value = AiPlannerState(busy = true, streaming = "")
-        viewModelScope.launch {
+        _aiPlanner.value = AiPlannerState(
+            busy = true,
+            streaming = "",
+            startedAt = System.currentTimeMillis()
+        )
+        aiJob = viewModelScope.launch {
             try {
-                val raw = nvidia.streamChat(key, AiPlanner.messages(req)) { delta ->
-                    _aiPlanner.update { it.copy(streaming = (it.streaming + delta).takeLast(12000)) }
-                }
+                val raw = nvidia.streamChat(
+                    key,
+                    AiPlanner.messages(req),
+                    onDelta = { delta ->
+                        _aiPlanner.update {
+                            it.copy(streaming = (it.streaming + delta).takeLast(12000))
+                        }
+                    },
+                    onActivity = {
+                        _aiPlanner.update { it.copy(events = it.events + 1) }
+                    }
+                )
                 val plan = AiPlanner.parse(raw)
                 _aiPlanner.value = AiPlannerState(plan = plan, applied = true)
                 applyAiTraining(plan.training)
+            } catch (t: kotlinx.coroutines.CancellationException) {
+                throw t
             } catch (t: Throwable) {
+                if (!isActive) return@launch
                 _aiPlanner.value = AiPlannerState(
                     error = t.message ?: "AI planning failed. Check the key and connection."
                 )
+            } finally {
+                aiJob = null
             }
         }
+    }
+
+    fun cancelAiPlan() {
+        aiJob?.cancel()
+        aiJob = null
+        nvidia.cancel()
+        _aiPlanner.update {
+            it.copy(busy = false, error = "AI request cancelled. You can retry when ready.")
+        }
+    }
+
+    override fun onCleared() {
+        aiJob?.cancel()
+        nvidia.cancel()
+        super.onCleared()
     }
 
     private fun applyAiTraining(training: AiTrainingPlan) {

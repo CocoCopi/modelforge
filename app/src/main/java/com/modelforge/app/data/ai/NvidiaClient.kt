@@ -10,6 +10,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
+import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -23,41 +24,66 @@ class AiException(message: String, cause: Throwable? = null) : Exception(message
 object NvidiaStreamParser {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
-    fun delta(data: String): String? {
-        val root = runCatching { json.parseToJsonElement(data) as? JsonObject }.getOrNull() ?: return null
+    private fun firstChoice(data: String): JsonObject? {
+        val root = runCatching { json.parseToJsonElement(data.trim()) as? JsonObject }.getOrNull() ?: return null
         val choices = root["choices"] as? JsonArray ?: return null
-        val delta = (choices.firstOrNull() as? JsonObject)?.get("delta") as? JsonObject ?: return null
-        val content = delta["content"] ?: return null
-        return when (content) {
-            is JsonPrimitive -> content.contentOrNull ?: content.toString().trim('"')
-            is JsonArray -> content.mapNotNull { part ->
-                val obj = part as? JsonObject ?: return@mapNotNull null
-                (obj["text"] as? JsonPrimitive)?.contentOrNull
-            }.joinToString("")
-            else -> null
-        }?.takeIf { it.isNotEmpty() }
+        return choices.firstOrNull() as? JsonObject
+    }
+
+    private fun textOf(element: kotlinx.serialization.json.JsonElement?): String? = when (element) {
+        is JsonPrimitive -> element.contentOrNull ?: element.toString().trim('"')
+        is JsonArray -> element.mapNotNull { part ->
+            val obj = part as? JsonObject ?: return@mapNotNull null
+            (obj["text"] as? JsonPrimitive)?.contentOrNull
+        }.joinToString("")
+        else -> null
+    }?.takeIf { it.isNotEmpty() }
+
+    fun delta(data: String): String? {
+        val delta = firstChoice(data)?.get("delta") as? JsonObject ?: return null
+        return textOf(delta["content"])
+    }
+
+    fun reasoningDelta(data: String): String? {
+        val delta = firstChoice(data)?.get("delta") as? JsonObject ?: return null
+        return textOf(delta["reasoning_content"] ?: delta["reasoning"])
+    }
+
+    fun fullContent(data: String): String? {
+        val choice = firstChoice(data) ?: return null
+        val message = choice["message"] as? JsonObject
+        return textOf(message?.get("content")) ?: textOf(choice["text"])
     }
 }
 
 class NvidiaClient(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(300, TimeUnit.SECONDS)
+        .readTimeout(90, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(180, TimeUnit.SECONDS)
         .build()
 ) {
+    @Volatile
+    private var activeCall: Call? = null
+
+    fun cancel() {
+        activeCall?.cancel()
+    }
+
     suspend fun streamChat(
         apiKey: String,
         messages: List<AiMessage>,
-        onDelta: (String) -> Unit = {}
+        onDelta: (String) -> Unit = {},
+        onActivity: () -> Unit = {}
     ): String = withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) throw AiException("No NVIDIA API key saved.")
         val payload = buildJsonObject {
             put("model", MODEL)
-            put("max_tokens", 16384)
+            put("max_tokens", 8192)
             put("seed", 0)
             put("stream", true)
-            put("temperature", 1.0)
+            put("temperature", 0.4)
             put("top_p", 0.95)
             put("messages", buildJsonArray {
                 messages.forEach { message ->
@@ -74,13 +100,30 @@ class NvidiaClient(
             .header("Accept", "text/event-stream")
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
+        val call = client.newCall(request)
+        activeCall = call
         try {
-            client.newCall(request).execute().use { response ->
+            call.execute().use { response ->
                 if (!response.isSuccessful) {
-                    val detail = response.body?.string().orEmpty().take(400)
-                    throw AiException("NVIDIA returned HTTP ${response.code}. ${detail.trim()}")
+                    val detail = response.body?.string().orEmpty().take(500).trim()
+                    val hint = when (response.code) {
+                        401, 403 -> "Check that the NVIDIA API key is valid and has access to $MODEL."
+                        404 -> "The model $MODEL may not be available to this account."
+                        429 -> "NVIDIA rate limit reached. Wait a minute and retry."
+                        else -> "The hosted request failed."
+                    }
+                    throw AiException("NVIDIA HTTP ${response.code}: $detail $hint")
                 }
                 val body = response.body ?: throw AiException("NVIDIA returned an empty response.")
+                val contentType = response.header("Content-Type").orEmpty()
+                if (!contentType.contains("text/event-stream", ignoreCase = true)) {
+                    val raw = body.string()
+                    val content = NvidiaStreamParser.fullContent(raw)
+                        ?: throw AiException("NVIDIA returned an unexpected response: ${raw.take(300)}")
+                    onActivity()
+                    onDelta(content)
+                    return@withContext content
+                }
                 val source = body.source()
                 val out = StringBuilder()
                 while (true) {
@@ -89,17 +132,34 @@ class NvidiaClient(
                     val data = line.removePrefix("data:").trim()
                     if (data.isBlank()) continue
                     if (data == "[DONE]") break
-                    val delta = NvidiaStreamParser.delta(data) ?: continue
-                    out.append(delta)
-                    onDelta(delta)
+                    onActivity()
+                    val delta = NvidiaStreamParser.delta(data)
+                    if (delta != null) {
+                        out.append(delta)
+                        onDelta(delta)
+                    }
                 }
-                if (out.isBlank()) throw AiException("The AI returned no text.")
+                if (out.isBlank()) {
+                    throw AiException(
+                        "NVIDIA finished without returning plan text. The model may have spent its budget " +
+                            "on hidden reasoning. Retry, or try again with a shorter model plan."
+                    )
+                }
                 out.toString()
             }
         } catch (t: AiException) {
             throw t
         } catch (t: Throwable) {
-            throw AiException("Could not reach NVIDIA: ${t.message ?: t.javaClass.simpleName}", t)
+            val message = t.message ?: t.javaClass.simpleName
+            throw AiException(
+                if (message.contains("Canceled", ignoreCase = true) ||
+                    message.contains("Socket closed", ignoreCase = true)
+                ) "AI request was cancelled."
+                else "Could not reach NVIDIA: $message",
+                t
+            )
+        } finally {
+            activeCall = null
         }
     }
 

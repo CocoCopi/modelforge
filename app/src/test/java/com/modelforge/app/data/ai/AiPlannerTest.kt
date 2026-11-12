@@ -100,3 +100,18 @@ class AiPlannerTest {
         assertEquals("jo", NvidiaStreamParser.delta("""{"choices":[{"delta":{"content":[{"type":"text","text":"jo"}]}}]}"""))
     }
 }
+
+class NvidiaResponseTest {
+    @Test
+    fun parses_non_streaming_message_content() {
+        val raw = """{"choices":[{"message":{"role":"assistant","content":"{\"overview\":\"ok\"}"}}]}"""
+        assertEquals("{\"overview\":\"ok\"}", NvidiaStreamParser.fullContent(raw))
+    }
+
+    @Test
+    fun ignores_reasoning_frames_for_content_but_reads_them_separately() {
+        val reasoning = """{"choices":[{"delta":{"reasoning_content":"thinking"}}]}"""
+        assertEquals(null, NvidiaStreamParser.delta(reasoning))
+        assertEquals("thinking", NvidiaStreamParser.reasoningDelta(reasoning))
+    }
+}

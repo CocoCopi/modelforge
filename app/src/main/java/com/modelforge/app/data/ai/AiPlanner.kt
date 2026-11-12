@@ -75,12 +75,14 @@ object AiPlanner {
         non-commercial, say so in the licence field and warnings. Tamil must be
         included when it is selected. For every requested capability (general
         text, identity, reasoning, tool calls, each language, each modality)
-        provide a dataset suggestion. Give rows and mix weights that fit a small
+        provide a dataset suggestion, but keep the whole plan compact: at most 8
+        dataset suggestions total. Give rows and mix weights that fit a small
         phone model. Use these architecture ids only:
         gpt_text (traditional transformer), ncm_text (NCM), ai_architecture
         (AI-designed experimental architecture). The app currently downloads
         text datasets only; for image, audio, video or documents, recommend data
         but warn that native training for it is not built yet.
+        Return the final JSON promptly. Do not narrate or add extra sections.
         JSON shape:
         {
           "overview": "fluent plain-language overview with an analogy",
