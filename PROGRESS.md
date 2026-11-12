@@ -117,7 +117,8 @@ resume path and support logic.
 
 ## Phase 5 - quantized packed export and inference
 
-Status: implemented, awaiting CI green.
+Status: DONE - CI run 43155091694 green. The first attempt failed only because
+jni.cpp needed `using mf::PackedModel`; host tests had already passed.
 
 - `GPT::save_packed` writes a deployment file (`MFPK`): config header, fp32
   embeddings/norms/biases/tied embedding head, and 2/3/4/8-bit symmetric
