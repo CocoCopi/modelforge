@@ -9,6 +9,7 @@
 
 using mf::GPT;
 using mf::ModelConfig;
+using mf::PackedModel;
 
 namespace {
 
