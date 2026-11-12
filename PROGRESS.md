@@ -221,3 +221,36 @@ https://github.com/CocoCopi/modelforge/releases/tag/v1.0.0
   development build, not a signed production release.
 - Remaining gaps are documented rather than hidden: physical-device UI
   verification, release signing/proguard, an app icon, and Compose UI tests.
+
+## v2 Phase 1 - design system and screenshot gate
+
+Status: DONE - CI run 43165048507 green (host native tests, JVM tests,
+`verifyPaparazziDebug`, debug APK and screenshot artifacts).
+
+- Replaced the generic dark Material look with the light "maker's notebook"
+  system: paper/surface/ink/hairline tokens, one ember accent, verdigris and
+  ochre annotations, 4-6 dp corners, 1 dp rules and an 8 dp spacing rhythm.
+- Bundled Fraunces (display and live numbers), Instrument Sans (body/UI) and
+  JetBrains Mono (ledger data) as static TTFs with OFL licences in `res/raw`.
+  Typography, shapes and the full light Material colour scheme live in
+  `ui/theme/Theme.kt` and `ui/theme/Type.kt`.
+- Added signature components in `ui/design/Signature.kt`: parameter ruler with
+  decade haptics, bit-grain selector with real sizes, wizard ruler, ledger
+  chart, typographic empty state, rectangular buttons, status tags, ledger stats
+  and notebook cards.
+- Restyled Home, Wizard, Training, Model detail and Playground to the new
+  components. Removed the old `ForgeAccent`/`ForgeBlue` colour aliases so screens
+  use the token object directly.
+- Added a scrollable design proof screen reachable from Home, and a Paparazzi
+  JVM screenshot harness pinned to 1.3.4 to match Kotlin 1.9.24. The checked-in
+  golden is verified with `verifyPaparazziDebug` in CI; snapshots and failure
+  output are uploaded as artifacts.
+- AA decisions are enforced in `scripts/check_contrast.py`: body ember text uses
+  `emberText`, warning text uses `ochreInk`, and `ember` is reserved for large
+  type, icons and marks. All documented pairs pass.
+- The screenshot is layoutlib/JVM output, not a physical-device render. Device
+  UI verification remains an explicit gap.
+
+Remaining v2 work starts with the architecture registry, model config and the
+14-step one-question-per-screen wizard, then identity, speed/reasoning and the
+new architecture/modality paths.
