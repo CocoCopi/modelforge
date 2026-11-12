@@ -426,3 +426,15 @@ Status: DONE - CI run 43260935632 green (host native tests, JVM tests,
 Limitations: the real NVIDIA endpoint was not called in CI because no API key
 is stored there. NCM and AI-designed architectures still need native engines;
 the planner designs their data and settings but cannot train them yet.
+
+## Production release engineering
+
+Status: IN PROGRESS - release signing, R8, launcher icon and release artifacts.
+
+- CI debug and release builds use a stable project signing key stored only in
+  GitHub Actions secrets. Existing v1.0.0/debug installs must be uninstalled
+  once because their ephemeral certificate differs.
+- Version advanced to `2.0.0` (`versionCode 2`).
+- Added adaptive launcher icon and light splash/window colours.
+- Enabled R8 code shrinking, resource shrinking and conservative keep rules for
+  JNI, persisted JSON models, Retrofit and kotlinx.serialization.

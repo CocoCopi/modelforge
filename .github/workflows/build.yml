@@ -99,6 +99,39 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
+      - name: Build release APK and AAB
+        run: ./gradlew assembleRelease bundleRelease --stacktrace --no-daemon
+
+      - name: Verify release signing
+        run: |
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            "$ANDROID_SDK_ROOT/build-tools/34.0.0/apksigner" verify --verbose \
+              app/build/outputs/apk/release/app-release.apk
+          else
+            echo "No signing key available; release APK is unsigned."
+          fi
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: modelforge-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: ignore
+
+      - name: Upload release AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: modelforge-release-aab
+          path: app/build/outputs/bundle/release/*.aab
+          if-no-files-found: ignore
+
+      - name: Upload ProGuard mapping
+        uses: actions/upload-artifact@v4
+        with:
+          name: modelforge-mapping
+          path: app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: ignore
+
       - name: Upload test reports on failure
         if: failure()
         uses: actions/upload-artifact@v4
