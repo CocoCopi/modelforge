@@ -157,6 +157,12 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
                     }
                 }
                 OutlinedButton(
+                    onClick = { vm.openPlayground(modelId) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Open playground and export")
+                }
+                OutlinedButton(
                     onClick = { confirmDelete = true },
                     modifier = Modifier.fillMaxWidth(),
                     enabled = !active
@@ -171,8 +177,8 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
                     )
                 }
                 Text(
-                    "Playground text generation and packed export arrive in the next update. " +
-                        "This model's best checkpoint is ready.",
+                    "The playground loads this model's best checkpoint or a packed export, " +
+                        "generates text, and shares the packed file through Android's share sheet.",
                     style = MaterialTheme.typography.bodySmall,
                     color = ForgeBlue
                 )

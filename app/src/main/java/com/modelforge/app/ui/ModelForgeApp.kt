@@ -16,10 +16,10 @@ fun ModelForgeRoot(vm: ModelForgeViewModel = viewModel()) {
     val screen by vm.screen.collectAsState()
 
     BackHandler(enabled = screen !is Screen.Home) {
-        if (screen is Screen.Wizard) {
-            vm.wizardBack()
-        } else {
-            vm.goHome()
+        when (val current = screen) {
+            is Screen.Wizard -> vm.wizardBack()
+            is Screen.Playground -> vm.openModel(current.modelId)
+            else -> vm.goHome()
         }
     }
 
@@ -33,6 +33,7 @@ fun ModelForgeRoot(vm: ModelForgeViewModel = viewModel()) {
             is Screen.Wizard -> WizardScreen(vm)
             is Screen.Training -> TrainingScreen(vm, current.modelId)
             is Screen.ModelDetail -> ModelDetailScreen(vm, current.modelId)
+            is Screen.Playground -> PlaygroundScreen(vm, current.modelId)
         }
     }
 }

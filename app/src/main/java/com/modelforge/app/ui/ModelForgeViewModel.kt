@@ -18,7 +18,11 @@ import com.modelforge.app.data.hf.HfClient
 import com.modelforge.app.data.hf.HfDatasetSummary
 import com.modelforge.app.data.hf.HfRepository
 import com.modelforge.app.data.hf.isLikelyNonCommercial
+import com.modelforge.app.data.tokenizer.BpeTokenizer
+import com.modelforge.app.nativebridge.NativeModel
+import com.modelforge.app.nativebridge.PackedModel
 import com.modelforge.app.training.TrainingService
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -31,6 +35,7 @@ sealed class Screen {
     object Wizard : Screen()
     data class Training(val modelId: String) : Screen()
     data class ModelDetail(val modelId: String) : Screen()
+    data class Playground(val modelId: String) : Screen()
 }
 
 data class WizardState(
@@ -67,6 +72,29 @@ data class WizardState(
         get() = modelId != null && config != null && name.isNotBlank() && datasets.isNotEmpty()
 }
 
+data class PlaygroundState(
+    val modelId: String = "",
+    val prompt: String = "Once upon a time",
+    val maxNew: Int = 120,
+    val temperature: Float = 0.8f,
+    val topK: Int = 40,
+    val topP: Float = 0.95f,
+    val mode: String = "checkpoint",
+    val bits: Int = 4,
+    val output: String = "",
+    val busy: Boolean = false,
+    val status: String = "",
+    val tokensPerSec: Double = 0.0,
+    val generatedTokens: Int = 0,
+    val exportedBytes: Long = 0L,
+    val error: String? = null
+) {
+    companion object {
+        const val MODE_CHECKPOINT = "checkpoint"
+        const val MODE_PACKED = "packed"
+    }
+}
+
 class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
 
     private val store = ModelStore(app)
@@ -90,6 +118,9 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _notice = MutableStateFlow<String?>(null)
     val notice: StateFlow<String?> = _notice.asStateFlow()
+
+    private val _playground = MutableStateFlow(PlaygroundState())
+    val playground: StateFlow<PlaygroundState> = _playground.asStateFlow()
 
     fun manifest(id: String): ModelManifest? = store.loadManifest(id)
 
@@ -409,6 +440,185 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     fun resumeTraining() = TrainingService.resume(getApplication())
 
     fun stopTraining() = TrainingService.stop(getApplication())
+
+    fun openPlayground(id: String) {
+        val manifest = store.loadManifest(id) ?: return
+        val bits = manifest.config.bits.takeIf { it in 2..8 } ?: 4
+        _playground.value = PlaygroundState(modelId = id, bits = bits)
+        _screen.value = Screen.Playground(id)
+    }
+
+    fun packedFile(id: String, bits: Int): File = store.packedFile(id, bits)
+
+    fun packedFileSize(id: String, bits: Int): Long =
+        store.packedFile(id, bits).takeIf { it.exists() }?.length() ?: 0L
+
+    fun updatePlaygroundPrompt(value: String) {
+        _playground.update { it.copy(prompt = value) }
+    }
+
+    fun updatePlaygroundMaxNew(value: Int) {
+        _playground.update { it.copy(maxNew = value.coerceIn(8, 512)) }
+    }
+
+    fun updatePlaygroundTemperature(value: Float) {
+        _playground.update { it.copy(temperature = value.coerceIn(0.05f, 2f)) }
+    }
+
+    fun updatePlaygroundTopK(value: Int) {
+        _playground.update { it.copy(topK = value.coerceIn(1, 200)) }
+    }
+
+    fun updatePlaygroundTopP(value: Float) {
+        _playground.update { it.copy(topP = value.coerceIn(0.05f, 1f)) }
+    }
+
+    fun updatePlaygroundMode(mode: String) {
+        _playground.update { it.copy(mode = mode, error = null) }
+    }
+
+    fun updatePlaygroundBits(bits: Int) {
+        if (bits !in intArrayOf(2, 3, 4, 8)) return
+        _playground.update { it.copy(bits = bits, exportedBytes = 0L, error = null) }
+    }
+
+    fun generatePlayground() {
+        val state = _playground.value
+        if (state.busy || state.modelId.isBlank()) return
+        val id = state.modelId
+        val tokenizerFile = store.tokenizerFile(id)
+        if (!tokenizerFile.exists()) {
+            _playground.update {
+                it.copy(error = "This model has no tokenizer yet. Train it before generating text.")
+            }
+            return
+        }
+        val checkpoint = store.bestCheckpoint(id)
+        val packed = store.packedFile(id, state.bits)
+        if (state.mode == PlaygroundState.MODE_PACKED && !packed.exists()) {
+            _playground.update {
+                it.copy(error = "Export a ${state.bits}-bit packed file first.")
+            }
+            return
+        }
+        if (state.mode == PlaygroundState.MODE_CHECKPOINT && !checkpoint.exists()) {
+            _playground.update {
+                it.copy(error = "No best checkpoint yet. Start or finish training first.")
+            }
+            return
+        }
+        viewModelScope.launch(Dispatchers.Default) {
+            _playground.update { it.copy(busy = true, status = "Generating…", error = null) }
+            try {
+                val tokenizer = BpeTokenizer.load(tokenizerFile)
+                val encoded = tokenizer.encode(state.prompt)
+                val prompt = if (encoded.isEmpty()) tokenizer.encode(" ") else encoded
+                val maxNew = state.maxNew.coerceIn(1, 512)
+                var text = ""
+                var tokens = 0
+                var perSecond = 0.0
+                if (state.mode == PlaygroundState.MODE_PACKED) {
+                    val model = PackedModel.load(packed.absolutePath)
+                        ?: throw IllegalStateException("Could not load the packed file. Export it again.")
+                    try {
+                        val trimmed = prompt.takeLast((model.config.contextLength - 1).coerceAtLeast(1))
+                            .toIntArray()
+                        val started = System.nanoTime()
+                        val generated = model.generate(
+                            trimmed, maxNew, state.temperature, state.topK, state.topP, System.nanoTime()
+                        )
+                        val seconds = (System.nanoTime() - started) / 1_000_000_000.0
+                        text = tokenizer.decode(trimmed + generated)
+                        tokens = generated.size
+                        perSecond = if (seconds > 0.0) generated.size / seconds else 0.0
+                    } finally {
+                        model.close()
+                    }
+                } else {
+                    val model = NativeModel.load(checkpoint.absolutePath)
+                        ?: throw IllegalStateException("Could not load the best checkpoint.")
+                    try {
+                        val trimmed = prompt.takeLast((model.config.contextLength - 1).coerceAtLeast(1))
+                            .toIntArray()
+                        val started = System.nanoTime()
+                        val generated = model.generate(
+                            trimmed, maxNew, state.temperature, state.topK, state.topP, System.nanoTime()
+                        )
+                        val seconds = (System.nanoTime() - started) / 1_000_000_000.0
+                        text = tokenizer.decode(trimmed + generated)
+                        tokens = generated.size
+                        perSecond = if (seconds > 0.0) generated.size / seconds else 0.0
+                    } finally {
+                        model.close()
+                    }
+                }
+                _playground.update {
+                    it.copy(
+                        busy = false,
+                        status = "",
+                        output = text,
+                        generatedTokens = tokens,
+                        tokensPerSec = perSecond
+                    )
+                }
+            } catch (t: Throwable) {
+                _playground.update {
+                    it.copy(
+                        busy = false,
+                        status = "",
+                        error = t.message ?: "Generation failed."
+                    )
+                }
+            }
+        }
+    }
+
+    fun exportPacked() {
+        val state = _playground.value
+        if (state.busy || state.modelId.isBlank()) return
+        val id = state.modelId
+        val bits = state.bits
+        val checkpoint = store.bestCheckpoint(id)
+        if (!checkpoint.exists()) {
+            _playground.update {
+                it.copy(error = "No best checkpoint yet. Start or finish training first.")
+            }
+            return
+        }
+        viewModelScope.launch(Dispatchers.Default) {
+            _playground.update {
+                it.copy(busy = true, status = "Exporting ${bits}-bit packed model…", error = null)
+            }
+            try {
+                val model = NativeModel.load(checkpoint.absolutePath)
+                    ?: throw IllegalStateException("Could not load the best checkpoint.")
+                try {
+                    val target = store.packedFile(id, bits)
+                    if (!model.savePacked(target.absolutePath, bits, 32)) {
+                        throw IllegalStateException("The native exporter rejected the ${bits}-bit export.")
+                    }
+                    _playground.update {
+                        it.copy(
+                            busy = false,
+                            status = "Exported ${target.name}",
+                            mode = PlaygroundState.MODE_PACKED,
+                            exportedBytes = target.length()
+                        )
+                    }
+                } finally {
+                    model.close()
+                }
+            } catch (t: Throwable) {
+                _playground.update {
+                    it.copy(
+                        busy = false,
+                        status = "",
+                        error = t.message ?: "Export failed."
+                    )
+                }
+            }
+        }
+    }
 
     fun deleteModel(id: String) {
         if (store.loadLiveState(id)?.isActive == true) {
