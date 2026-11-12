@@ -12,7 +12,7 @@ object ModelCard {
         generatedAt: Long = System.currentTimeMillis()
     ): String {
         val config = manifest.config
-        val info = ArchitectureRegistry.info(manifest.architectureId)
+        val info = ArchitectureRegistry.info(manifest.config.architectureId)
         val date = SimpleDateFormat("yyyy-MM-dd HH:mm 'UTC'", Locale.US)
             .format(Date(generatedAt))
         val settings = manifest.settings
