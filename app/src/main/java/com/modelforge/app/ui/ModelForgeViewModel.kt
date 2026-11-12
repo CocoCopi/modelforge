@@ -11,7 +11,9 @@ import com.modelforge.app.core.ModelConfig
 import com.modelforge.app.core.ResponseModes
 import com.modelforge.app.data.DatasetMixEntry
 import com.modelforge.app.data.ModelManifest
+import com.modelforge.app.data.ModelPreset
 import com.modelforge.app.data.ModelStore
+import com.modelforge.app.data.PresetStore
 import com.modelforge.app.data.SecureTokenStore
 import com.modelforge.app.data.TrainingLiveState
 import com.modelforge.app.data.TrainingSettings
@@ -34,6 +36,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.UUID
 
 sealed class Screen {
     object Home : Screen()
@@ -139,6 +142,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
 
     private val store = ModelStore(app)
     private val draftStore = WizardDraftStore(app)
+    private val presetStore = PresetStore(app)
     private val tokenStore = SecureTokenStore(app)
     private val hf = HfRepository(HfClient.create { tokenStore.token })
 
@@ -153,6 +157,9 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _wizard = MutableStateFlow(WizardState())
     val wizard: StateFlow<WizardState> = _wizard.asStateFlow()
+
+    private val _presets = MutableStateFlow(presetStore.list())
+    val presets: StateFlow<List<ModelPreset>> = _presets.asStateFlow()
 
     private val _tokenPresent = MutableStateFlow(tokenStore.token != null)
     val tokenPresent: StateFlow<Boolean> = _tokenPresent.asStateFlow()
@@ -381,6 +388,85 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                     .toInt()
             )
         }
+    }
+
+    fun savePreset(presetName: String) {
+        val label = presetName.trim()
+        if (label.isBlank()) return
+        val state = _wizard.value
+        val preset = ModelPreset(
+            id = UUID.randomUUID().toString(),
+            name = label.take(60),
+            architectureId = state.architectureId,
+            targetParams = state.targetParams,
+            contextLength = state.contextChoice,
+            languages = state.languages.toList(),
+            speedMode = state.speedMode,
+            reasoningEnabled = state.reasoningEnabled,
+            reasoningRoom = state.reasoningRoom,
+            toolCalling = state.toolCalling,
+            persona = state.persona,
+            bits = state.bits,
+            steps = state.steps,
+            batchSize = state.batchSize,
+            seqLength = state.seqLength,
+            learningRate = state.learningRate,
+            warmupSteps = state.warmupSteps,
+            checkpointEvery = state.checkpointEvery,
+            sampleEvery = state.sampleEvery,
+            corpusChars = state.corpusChars
+        )
+        _presets.value = presetStore.save(preset)
+        _notice.value = "Preset \"${preset.name}\" saved. Datasets are not part of a preset."
+    }
+
+    fun applyPreset(id: String) {
+        val preset = _presets.value.firstOrNull { it.id == id } ?: return
+        val info = ArchitectureRegistry.info(preset.architectureId)
+        if (!info.available) {
+            _notice.value = info.unavailableReason ?: "That architecture is not available."
+            return
+        }
+        val derive = ArchitectureRegistry.derive(
+            preset.architectureId,
+            preset.targetParams.coerceIn(1_000_000L, maxTargetParams),
+            maxTargetParams,
+            preset.contextLength.takeIf { it > 0 }
+        )
+        val config = derive.config
+        if (config == null) {
+            _notice.value = derive.explanation.ifBlank { "Could not derive that preset." }
+            return
+        }
+        updateWizard {
+            it.copy(
+                architectureId = preset.architectureId,
+                targetParams = preset.targetParams,
+                contextChoice = preset.contextLength,
+                languages = preset.languages.toSet(),
+                speedMode = preset.speedMode,
+                reasoningEnabled = preset.reasoningEnabled,
+                reasoningRoom = preset.reasoningRoom,
+                toolCalling = preset.toolCalling,
+                persona = preset.persona,
+                bits = if (preset.bits in info.supportedBits) preset.bits else info.supportedBits.firstOrNull() ?: 4,
+                steps = preset.steps,
+                batchSize = preset.batchSize,
+                seqLength = preset.seqLength,
+                learningRate = preset.learningRate,
+                warmupSteps = preset.warmupSteps,
+                checkpointEvery = preset.checkpointEvery,
+                sampleEvery = preset.sampleEvery,
+                corpusChars = preset.corpusChars,
+                config = config,
+                error = null
+            )
+        }
+        _notice.value = "Preset \"${preset.name}\" applied. Add datasets before training."
+    }
+
+    fun deletePreset(id: String) {
+        _presets.value = presetStore.delete(id)
     }
 
     fun nextStep() {

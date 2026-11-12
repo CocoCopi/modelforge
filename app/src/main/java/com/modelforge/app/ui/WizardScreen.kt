@@ -22,6 +22,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -725,6 +728,8 @@ private fun BudgetStep(vm: ModelForgeViewModel, state: WizardState) {
 private fun ReviewStep(vm: ModelForgeViewModel, state: WizardState) {
     val config = state.config
     val info = ArchitectureRegistry.info(state.architectureId)
+    val presets by vm.presets.collectAsState()
+    var presetName by remember { mutableStateOf("") }
     SectionCard("Review") {
         LedgerStat("name", state.name.ifBlank { "—" })
         LedgerStat("creator", state.creator.ifBlank { "—" })
@@ -755,6 +760,54 @@ private fun ReviewStep(vm: ModelForgeViewModel, state: WizardState) {
                 style = ForgeType.monoSmall,
                 color = ForgeColors.inkMuted
             )
+        }
+    }
+
+    SectionCard("Presets") {
+        Text(
+            "Save these settings for another model. Datasets are not included; " +
+                "you will still choose data for each model.",
+            style = MaterialTheme.typography.bodySmall,
+            color = ForgeColors.inkMuted
+        )
+        OutlinedTextField(
+            value = presetName,
+            onValueChange = { presetName = it.take(60) },
+            label = { Text("Preset name") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        ForgeButton(
+            "Save preset",
+            onClick = {
+                vm.savePreset(presetName)
+                presetName = ""
+            },
+            enabled = presetName.isNotBlank(),
+            modifier = Modifier.fillMaxWidth(),
+            primary = true
+        )
+        presets.forEach { preset ->
+            Hairline()
+            Text(preset.name, style = MaterialTheme.typography.headlineSmall, color = ForgeColors.ink)
+            Text(
+                preset.summary,
+                style = ForgeType.monoSmall,
+                color = ForgeColors.inkMuted
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ForgeOutlineButton(
+                    "Apply",
+                    onClick = { vm.applyPreset(preset.id) },
+                    modifier = Modifier.weight(1f)
+                )
+                ForgeOutlineButton(
+                    "Delete",
+                    onClick = { vm.deletePreset(preset.id) },
+                    modifier = Modifier.weight(1f),
+                    tint = ForgeColors.error
+                )
+            }
         }
     }
 
