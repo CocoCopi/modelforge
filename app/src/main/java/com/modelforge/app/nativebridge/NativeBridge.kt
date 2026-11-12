@@ -56,5 +56,25 @@ object NativeBridge {
 
     external fun nativeLoadCheckpoint(path: String, withOptimizer: Boolean): Long
 
+    external fun nativeSavePacked(handle: Long, path: String, bits: Int, group: Int): Boolean
+
+    external fun nativeLoadPacked(path: String): Long
+
+    external fun nativePackedFree(handle: Long)
+
+    external fun nativePackedParamCount(handle: Long): Long
+
+    external fun nativePackedConfig(handle: Long): IntArray?
+
+    external fun nativePackedGenerate(
+        handle: Long,
+        prompt: IntArray,
+        maxNew: Int,
+        temperature: Float,
+        topK: Int,
+        topP: Float,
+        seed: Long
+    ): IntArray?
+
     fun version(): String = nativeVersion()
 }

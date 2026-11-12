@@ -578,6 +578,19 @@ std::vector<Linear*> GPT::linears() {
     return out;
 }
 
+std::vector<const Linear*> GPT::linears() const {
+    std::vector<const Linear*> out;
+    for (const auto& l : layers_) {
+        out.push_back(&l.wq);
+        out.push_back(&l.wk);
+        out.push_back(&l.wv);
+        out.push_back(&l.wo);
+        out.push_back(&l.w1);
+        out.push_back(&l.w2);
+    }
+    return out;
+}
+
 void GPT::set_qat(int bits, int group) {
     qat_bits_ = bits;
     qat_group_ = group;
@@ -1097,6 +1110,455 @@ bool GPT::load_checkpoint(const std::string& path, bool with_optimizer) {
     step_ = step;
     set_qat(qat_bits, qat_group);
     return true;
+}
+
+namespace {
+
+constexpr int32_t kPackedMagic = 0x4D46504B;  // "MFPK"
+constexpr int32_t kPackedVersion = 1;
+
+bool packed_bits_ok(int bits) {
+    return bits == 2 || bits == 3 || bits == 4 || bits == 8;
+}
+
+int normalized_group(int group) {
+    return group > 0 ? group : 32;
+}
+
+bool write_floats(FILE* f, const float* data, size_t count) {
+    return count == 0 || std::fwrite(data, sizeof(float), count, f) == count;
+}
+
+bool read_floats(FILE* f, float* data, size_t count) {
+    return count == 0 || std::fread(data, sizeof(float), count, f) == count;
+}
+
+bool write_bytes(FILE* f, const std::vector<uint8_t>& data) {
+    return data.empty() || std::fwrite(data.data(), 1, data.size(), f) == data.size();
+}
+
+bool read_bytes(FILE* f, std::vector<uint8_t>& data) {
+    return data.empty() || std::fread(data.data(), 1, data.size(), f) == data.size();
+}
+
+void write_bits(std::vector<uint8_t>& data, size_t bitpos, int bits, uint32_t value) {
+    const size_t byte = bitpos >> 3;
+    const int offset = static_cast<int>(bitpos & 7);
+    const uint32_t mask = (1u << bits) - 1u;
+    const uint32_t v = value & mask;
+    data[byte] |= static_cast<uint8_t>((v << offset) & 0xFFu);
+    if (offset + bits > 8) {
+        data[byte + 1] |= static_cast<uint8_t>(v >> (8 - offset));
+    }
+}
+
+inline int read_bits(const uint8_t* data, size_t bitpos, int bits) {
+    const size_t byte = bitpos >> 3;
+    const int offset = static_cast<int>(bitpos & 7);
+    uint32_t v = data[byte];
+    if (offset + bits > 8) v |= static_cast<uint32_t>(data[byte + 1]) << 8;
+    v = (v >> offset) & ((1u << bits) - 1u);
+    const int sign = 1 << (bits - 1);
+    return static_cast<int>(v ^ static_cast<uint32_t>(sign)) - sign;
+}
+
+void quantize_into(const float* w, int out, int in, int bits, int group,
+                   std::vector<uint8_t>& packed, std::vector<float>& scales) {
+    const int gs = normalized_group(group);
+    const int groups = (in + gs - 1) / gs;
+    const int qmax = (1 << (bits - 1)) - 1;
+    const size_t total = static_cast<size_t>(out) * static_cast<size_t>(in);
+    packed.assign((total * static_cast<size_t>(bits) + 7) / 8, 0);
+    scales.assign(static_cast<size_t>(out) * static_cast<size_t>(groups), 0.0f);
+
+    for (int r = 0; r < out; ++r) {
+        const float* wr = w + static_cast<size_t>(r) * in;
+        for (int g = 0; g < groups; ++g) {
+            const int j0 = g * gs;
+            const int j1 = std::min(in, j0 + gs);
+            float maxabs = 0.0f;
+            for (int j = j0; j < j1; ++j) maxabs = std::max(maxabs, std::fabs(wr[j]));
+            if (maxabs == 0.0f) continue;
+            const float scale = maxabs / static_cast<float>(qmax);
+            scales[static_cast<size_t>(r) * groups + g] = scale;
+            for (int j = j0; j < j1; ++j) {
+                float q = std::round(wr[j] / scale);
+                q = std::max(-static_cast<float>(qmax), std::min(static_cast<float>(qmax), q));
+                const uint32_t u = static_cast<uint32_t>(static_cast<int32_t>(q)) &
+                                   ((1u << bits) - 1u);
+                write_bits(packed, (static_cast<size_t>(r) * in + j) * bits, bits, u);
+            }
+        }
+    }
+}
+
+void matmul_packed(const Tensor& x, const PackedLinear& lin, Tensor& y) {
+    const int n = x.rows;
+    const int in = lin.in;
+    const int out = lin.out;
+    y.ensure(n, out);
+    if (in <= 0 || out <= 0 || x.cols != in) {
+        std::fill(y.d.begin(), y.d.end(), 0.0f);
+        return;
+    }
+    const int bits = lin.bits;
+    const int gs = normalized_group(lin.group);
+    const int groups = lin.groups();
+    const uint8_t* packed = lin.q.data();
+
+    auto body = [&](int r) {
+        const float* xr = x.row(r);
+        float* yr = y.row(r);
+        for (int o = 0; o < out; ++o) {
+            size_t bitpos = static_cast<size_t>(o) * in * bits;
+            float sum = 0.0f;
+            for (int g = 0; g < groups; ++g) {
+                const int j0 = g * gs;
+                const int j1 = std::min(in, j0 + gs);
+                float part = 0.0f;
+                for (int j = j0; j < j1; ++j) {
+                    part += xr[j] * static_cast<float>(read_bits(packed, bitpos, bits));
+                    bitpos += bits;
+                }
+                sum += part * lin.scales[static_cast<size_t>(o) * groups + g];
+            }
+            yr[o] = sum + lin.bias[o];
+        }
+    };
+
+    const int64_t work = static_cast<int64_t>(n) * out * in;
+    if (work < 300000) {
+        for (int r = 0; r < n; ++r) body(r);
+    } else {
+        parallel_for(n, body);
+    }
+}
+
+} // namespace
+
+bool GPT::save_packed(const std::string& path, int bits, int group) const {
+    if (!packed_bits_ok(bits)) return false;
+    const int gs = normalized_group(group);
+
+    size_t total_packed = 0;
+    size_t total_scales = 0;
+    for (const auto* lin : linears()) {
+        const int groups = (lin->in() + gs - 1) / gs;
+        total_packed += (static_cast<size_t>(lin->out()) * lin->in() * bits + 7) / 8;
+        total_scales += static_cast<size_t>(lin->out()) * groups;
+    }
+
+    const std::string tmp = path + ".tmp";
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f) return false;
+
+    int32_t magic = kPackedMagic;
+    int32_t version = kPackedVersion;
+    int32_t vocab = cfg_.vocab;
+    int32_t context = cfg_.context;
+    int32_t d_model = cfg_.d_model;
+    int32_t layers = cfg_.layers;
+    int32_t heads = cfg_.heads;
+    int32_t d_ff = cfg_.d_ff;
+    int32_t tied = cfg_.tied_embeddings ? 1 : 0;
+    int32_t out_bits = bits;
+    int32_t out_group = gs;
+    int64_t param_count = cfg_.param_count();
+    int64_t packed_bytes = static_cast<int64_t>(total_packed);
+    int64_t scale_count = static_cast<int64_t>(total_scales);
+
+    bool ok = true;
+    ok &= std::fwrite(&magic, sizeof(magic), 1, f) == 1;
+    ok &= std::fwrite(&version, sizeof(version), 1, f) == 1;
+    ok &= std::fwrite(&vocab, sizeof(vocab), 1, f) == 1;
+    ok &= std::fwrite(&context, sizeof(context), 1, f) == 1;
+    ok &= std::fwrite(&d_model, sizeof(d_model), 1, f) == 1;
+    ok &= std::fwrite(&layers, sizeof(layers), 1, f) == 1;
+    ok &= std::fwrite(&heads, sizeof(heads), 1, f) == 1;
+    ok &= std::fwrite(&d_ff, sizeof(d_ff), 1, f) == 1;
+    ok &= std::fwrite(&tied, sizeof(tied), 1, f) == 1;
+    ok &= std::fwrite(&out_bits, sizeof(out_bits), 1, f) == 1;
+    ok &= std::fwrite(&out_group, sizeof(out_group), 1, f) == 1;
+    ok &= std::fwrite(&param_count, sizeof(param_count), 1, f) == 1;
+    ok &= std::fwrite(&packed_bytes, sizeof(packed_bytes), 1, f) == 1;
+    ok &= std::fwrite(&scale_count, sizeof(scale_count), 1, f) == 1;
+
+    ok &= write_floats(f, wte_.data(), wte_.w.size());
+    ok &= write_floats(f, wpe_.data(), wpe_.w.size());
+    ok &= write_floats(f, lnf_g_.data(), lnf_g_.w.size());
+    ok &= write_floats(f, lnf_b_.data(), lnf_b_.w.size());
+
+    for (const auto& l : layers_) {
+        ok &= write_floats(f, l.ln1.gamma.data(), l.ln1.gamma.w.size());
+        ok &= write_floats(f, l.ln1.beta.data(), l.ln1.beta.w.size());
+        ok &= write_floats(f, l.ln2.gamma.data(), l.ln2.gamma.w.size());
+        ok &= write_floats(f, l.ln2.beta.data(), l.ln2.beta.w.size());
+        for (const auto* lin : {&l.wq, &l.wk, &l.wv, &l.wo, &l.w1, &l.w2}) {
+            std::vector<uint8_t> packed;
+            std::vector<float> scales;
+            quantize_into(lin->weight.data(), lin->out(), lin->in(),
+                          bits, gs, packed, scales);
+            ok &= write_floats(f, lin->bias.data(), lin->bias.w.size());
+            ok &= write_bytes(f, packed);
+            ok &= write_floats(f, scales.data(), scales.size());
+        }
+    }
+
+    std::fclose(f);
+    if (!ok) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool PackedModel::load(const std::string& path) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return false;
+
+    int32_t magic = 0, version = 0;
+    int32_t vocab = 0, context = 0, d_model = 0, layers = 0, heads = 0, d_ff = 0, tied = 0;
+    int32_t bits = 0, group = 32;
+    int64_t param_count = 0, packed_bytes = 0, scale_count = 0;
+
+    bool ok = true;
+    ok &= std::fread(&magic, sizeof(magic), 1, f) == 1;
+    ok &= std::fread(&version, sizeof(version), 1, f) == 1;
+    ok &= std::fread(&vocab, sizeof(vocab), 1, f) == 1;
+    ok &= std::fread(&context, sizeof(context), 1, f) == 1;
+    ok &= std::fread(&d_model, sizeof(d_model), 1, f) == 1;
+    ok &= std::fread(&layers, sizeof(layers), 1, f) == 1;
+    ok &= std::fread(&heads, sizeof(heads), 1, f) == 1;
+    ok &= std::fread(&d_ff, sizeof(d_ff), 1, f) == 1;
+    ok &= std::fread(&tied, sizeof(tied), 1, f) == 1;
+    ok &= std::fread(&bits, sizeof(bits), 1, f) == 1;
+    ok &= std::fread(&group, sizeof(group), 1, f) == 1;
+    ok &= std::fread(&param_count, sizeof(param_count), 1, f) == 1;
+    ok &= std::fread(&packed_bytes, sizeof(packed_bytes), 1, f) == 1;
+    ok &= std::fread(&scale_count, sizeof(scale_count), 1, f) == 1;
+
+    ModelConfig cfg;
+    cfg.vocab = vocab;
+    cfg.context = context;
+    cfg.d_model = d_model;
+    cfg.layers = layers;
+    cfg.heads = heads;
+    cfg.d_ff = d_ff;
+    cfg.tied_embeddings = tied != 0;
+    if (!ok || magic != kPackedMagic || version != kPackedVersion ||
+        !cfg.valid() || cfg.param_count() != param_count ||
+        !packed_bits_ok(bits) || group <= 0) {
+        std::fclose(f);
+        return false;
+    }
+
+    cfg_ = cfg;
+    bits_ = bits;
+    group_ = group;
+    layers_.clear();
+    layers_.resize(static_cast<size_t>(cfg.layers));
+
+    wte_.init(cfg.vocab, cfg.d_model);
+    wpe_.init(cfg.context, cfg.d_model);
+    lnf_g_.init(1, cfg.d_model);
+    lnf_b_.init(1, cfg.d_model);
+    ok &= read_floats(f, wte_.data(), wte_.size());
+    ok &= read_floats(f, wpe_.data(), wpe_.size());
+    ok &= read_floats(f, lnf_g_.data(), lnf_g_.size());
+    ok &= read_floats(f, lnf_b_.data(), lnf_b_.size());
+
+    size_t read_packed = 0;
+    size_t read_scales = 0;
+    const int d = cfg.d_model;
+    const int df = cfg.d_ff;
+    for (auto& layer : layers_) {
+        layer.ln1_gamma.init(1, d);
+        layer.ln1_beta.init(1, d);
+        layer.ln2_gamma.init(1, d);
+        layer.ln2_beta.init(1, d);
+        ok &= read_floats(f, layer.ln1_gamma.data(), layer.ln1_gamma.size());
+        ok &= read_floats(f, layer.ln1_beta.data(), layer.ln1_beta.size());
+        ok &= read_floats(f, layer.ln2_gamma.data(), layer.ln2_gamma.size());
+        ok &= read_floats(f, layer.ln2_beta.data(), layer.ln2_beta.size());
+
+        PackedLinear* lins[6] = {&layer.wq, &layer.wk, &layer.wv,
+                                 &layer.wo, &layer.w1, &layer.w2};
+        const int outs[6] = {d, d, d, d, df, d};
+        const int ins[6] = {d, d, d, d, d, df};
+        for (int i = 0; i < 6; ++i) {
+            PackedLinear& lin = *lins[i];
+            lin.out = outs[i];
+            lin.in = ins[i];
+            lin.bits = bits;
+            lin.group = group;
+            lin.bias.assign(static_cast<size_t>(lin.out), 0.0f);
+            ok &= read_floats(f, lin.bias.data(), lin.bias.size());
+            const size_t pb = lin.packed_bytes();
+            const size_t sc = static_cast<size_t>(lin.out) * lin.groups();
+            lin.q.assign(pb, 0);
+            lin.scales.assign(sc, 0.0f);
+            ok &= read_bytes(f, lin.q);
+            ok &= read_floats(f, lin.scales.data(), lin.scales.size());
+            read_packed += pb;
+            read_scales += sc;
+        }
+    }
+
+    std::fclose(f);
+    if (!ok || read_packed != static_cast<size_t>(packed_bytes) ||
+        read_scales != static_cast<size_t>(scale_count)) {
+        layers_.clear();
+        return false;
+    }
+    cache_ = ForwardCache{};
+    return true;
+}
+
+void PackedModel::forward(const int* tokens, int B, int T) const {
+    if (!cfg_.valid() || tokens == nullptr || B <= 0 || T <= 0 || T > cfg_.context) return;
+    const int d = cfg_.d_model;
+    const int V = cfg_.vocab;
+    const int n = B * T;
+    const int df = cfg_.d_ff;
+
+    cache_.B = B;
+    cache_.T = T;
+    cache_.tokens.assign(tokens, tokens + n);
+    cache_.layers.resize(static_cast<size_t>(cfg_.layers));
+
+    Tensor cur(n, d);
+    for (int i = 0; i < n; ++i) {
+        const int tok = tokens[i];
+        const int pos = i % T;
+        const float* te = wte_.row(tok);
+        const float* pe = wpe_.row(pos);
+        float* xr = cur.row(i);
+        for (int j = 0; j < d; ++j) xr[j] = te[j] + pe[j];
+    }
+    cache_.x0 = cur;
+
+    for (int l = 0; l < cfg_.layers; ++l) {
+        const PackedLayer& layer = layers_[static_cast<size_t>(l)];
+        LayerCache& lc = cache_.layers[static_cast<size_t>(l)];
+
+        lc.xin = cur;
+        layernorm_forward(cur, layer.ln1_gamma.data(), layer.ln1_beta.data(),
+                          lc.ln1, lc.inv1, kLnEps);
+        matmul_packed(lc.ln1, layer.wq, lc.q);
+        matmul_packed(lc.ln1, layer.wk, lc.k);
+        matmul_packed(lc.ln1, layer.wv, lc.v);
+
+        attention_forward(cfg_, lc, B, T);
+
+        matmul_packed(lc.attn_out, layer.wo, lc.proj);
+        lc.xmid.ensure(n, d);
+        for (int i = 0; i < n; ++i) {
+            const float* a = cur.row(i);
+            const float* b = lc.proj.row(i);
+            float* o = lc.xmid.row(i);
+            for (int j = 0; j < d; ++j) o[j] = a[j] + b[j];
+        }
+
+        layernorm_forward(lc.xmid, layer.ln2_gamma.data(), layer.ln2_beta.data(),
+                          lc.ln2, lc.inv2, kLnEps);
+        matmul_packed(lc.ln2, layer.w1, lc.h1pre);
+        gelu_forward(lc.h1pre, lc.h1);
+        matmul_packed(lc.h1, layer.w2, lc.h2);
+
+        Tensor next(n, d);
+        for (int i = 0; i < n; ++i) {
+            const float* a = lc.xmid.row(i);
+            const float* b = lc.h2.row(i);
+            float* o = next.row(i);
+            for (int j = 0; j < d; ++j) o[j] = a[j] + b[j];
+        }
+        cur = std::move(next);
+    }
+
+    cache_.final_in = cur;
+    layernorm_forward(cur, lnf_g_.data(), lnf_b_.data(), cache_.lnf, cache_.invf, kLnEps);
+    matmul_nt_raw(cache_.lnf, wte_.data(), V, cache_.logits);
+}
+
+std::vector<int> PackedModel::generate(const std::vector<int>& prompt, int max_new,
+                                       float temperature, int top_k, float top_p,
+                                       uint64_t seed) const {
+    std::vector<int> seq = prompt;
+    if (seq.empty()) seq.push_back(0);
+    if (max_new <= 0) return {};
+    const int V = cfg_.vocab;
+    std::mt19937_64 rng(seed);
+    std::vector<int> generated;
+    generated.reserve(max_new);
+
+    for (int step = 0; step < max_new; ++step) {
+        const int start = std::max(0, static_cast<int>(seq.size()) - cfg_.context);
+        const int T = static_cast<int>(seq.size()) - start;
+        forward(seq.data() + start, 1, T);
+        const float* logits = cache_.logits.row(T - 1);
+
+        int next = 0;
+        if (temperature <= 0.0f) {
+            next = static_cast<int>(std::max_element(logits, logits + V) - logits);
+        } else {
+            std::vector<int> idx(V);
+            for (int i = 0; i < V; ++i) idx[i] = i;
+            std::vector<float> scaled(V);
+            for (int i = 0; i < V; ++i) scaled[i] = logits[i] / std::max(1e-5f, temperature);
+
+            int keep = V;
+            if (top_k > 0 && top_k < V) {
+                keep = top_k;
+                std::partial_sort(idx.begin(), idx.begin() + keep, idx.end(),
+                                  [&](int a, int b) { return scaled[a] > scaled[b]; });
+            } else {
+                std::sort(idx.begin(), idx.end(),
+                          [&](int a, int b) { return scaled[a] > scaled[b]; });
+            }
+
+            std::vector<float> probs(keep);
+            float mx = -1e30f;
+            for (int i = 0; i < keep; ++i) mx = std::max(mx, scaled[idx[i]]);
+            float sum = 0.0f;
+            for (int i = 0; i < keep; ++i) {
+                probs[i] = std::exp(scaled[idx[i]] - mx);
+                sum += probs[i];
+            }
+            for (int i = 0; i < keep; ++i) probs[i] /= sum;
+
+            int cutoff = keep;
+            if (top_p > 0.0f && top_p < 1.0f) {
+                float cumulative = 0.0f;
+                for (int i = 0; i < keep; ++i) {
+                    cumulative += probs[i];
+                    if (cumulative >= top_p) {
+                        cutoff = i + 1;
+                        break;
+                    }
+                }
+            }
+            float renorm = 0.0f;
+            for (int i = 0; i < cutoff; ++i) renorm += probs[i];
+            std::uniform_real_distribution<float> uni(0.0f, renorm);
+            const float target = uni(rng);
+            float acc = 0.0f;
+            next = idx[cutoff - 1];
+            for (int i = 0; i < cutoff; ++i) {
+                acc += probs[i];
+                if (target <= acc) {
+                    next = idx[i];
+                    break;
+                }
+            }
+        }
+        seq.push_back(next);
+        generated.push_back(next);
+    }
+    return generated;
 }
 
 } // namespace mf

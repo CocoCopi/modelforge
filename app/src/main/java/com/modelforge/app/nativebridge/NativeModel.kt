@@ -57,6 +57,12 @@ class NativeModel private constructor(
     }
 
     @Synchronized
+    fun savePacked(path: String, bits: Int, group: Int = 32): Boolean {
+        check(handle != 0L) { "Model is closed" }
+        return NativeBridge.nativeSavePacked(handle, path, bits, group)
+    }
+
+    @Synchronized
     override fun close() {
         if (handle != 0L) {
             NativeBridge.nativeFree(handle)

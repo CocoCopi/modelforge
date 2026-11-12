@@ -181,6 +181,91 @@ Java_com_modelforge_app_nativebridge_NativeBridge_nativeLoadCheckpoint(
     }
 }
 
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_modelforge_app_nativebridge_NativeBridge_nativeSavePacked(
+    JNIEnv* env, jobject /*thiz*/, jlong handle, jstring path, jint bits, jint group) {
+    GPT* m = from_handle(handle);
+    if (!m) return JNI_FALSE;
+    try {
+        const std::string p = to_string(env, path);
+        if (p.empty()) return JNI_FALSE;
+        return m->save_packed(p, bits, group) ? JNI_TRUE : JNI_FALSE;
+    } catch (...) {
+        return JNI_FALSE;
+    }
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_modelforge_app_nativebridge_NativeBridge_nativeLoadPacked(
+    JNIEnv* env, jobject /*thiz*/, jstring path) {
+    try {
+        const std::string p = to_string(env, path);
+        if (p.empty()) return 0;
+        auto* model = new (std::nothrow) PackedModel();
+        if (!model) return 0;
+        if (!model->load(p)) {
+            delete model;
+            return 0;
+        }
+        return static_cast<jlong>(reinterpret_cast<intptr_t>(model));
+    } catch (...) {
+        return 0;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_modelforge_app_nativebridge_NativeBridge_nativePackedFree(JNIEnv* /*env*/, jobject /*thiz*/,
+                                                                  jlong handle) {
+    delete reinterpret_cast<PackedModel*>(static_cast<intptr_t>(handle));
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_modelforge_app_nativebridge_NativeBridge_nativePackedParamCount(
+    JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
+    auto* m = reinterpret_cast<PackedModel*>(static_cast<intptr_t>(handle));
+    return m ? static_cast<jlong>(m->param_count()) : 0;
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_modelforge_app_nativebridge_NativeBridge_nativePackedConfig(
+    JNIEnv* env, jobject /*thiz*/, jlong handle) {
+    auto* m = reinterpret_cast<PackedModel*>(static_cast<intptr_t>(handle));
+    if (!m) return nullptr;
+    const ModelConfig& c = m->config();
+    jint vals[9] = {c.vocab, c.context, c.d_model, c.layers, c.heads, c.d_ff,
+                    c.tied_embeddings ? 1 : 0, m->bits(), m->group()};
+    jintArray result = env->NewIntArray(9);
+    if (result) env->SetIntArrayRegion(result, 0, 9, vals);
+    return result;
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_modelforge_app_nativebridge_NativeBridge_nativePackedGenerate(
+    JNIEnv* env, jobject /*thiz*/, jlong handle, jintArray prompt,
+    jint max_new, jfloat temperature, jint top_k, jfloat top_p, jlong seed) {
+    auto* m = reinterpret_cast<PackedModel*>(static_cast<intptr_t>(handle));
+    if (!m) return nullptr;
+    try {
+        std::vector<int> p;
+        if (!read_ints(env, prompt, p)) return nullptr;
+        for (int& v : p) {
+            if (v < 0) v = 0;
+            if (v >= m->config().vocab) v = m->config().vocab - 1;
+        }
+        const auto out = m->generate(p, max_new, temperature, top_k, top_p,
+                                     static_cast<uint64_t>(seed));
+        jintArray result = env->NewIntArray(static_cast<jsize>(out.size()));
+        if (result && !out.empty()) {
+            env->SetIntArrayRegion(result, 0, static_cast<jsize>(out.size()),
+                                   reinterpret_cast<const jint*>(out.data()));
+        }
+        return result;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* /*vm*/, void* /*reserved*/) {
     return JNI_VERSION_1_6;
 }

@@ -158,6 +158,10 @@ public:
     bool save_checkpoint(const std::string& path, bool with_optimizer) const;
     bool load_checkpoint(const std::string& path, bool with_optimizer);
 
+    // Exports a deployment file with linear weights quantized to bits (2/3/4/8)
+    // and everything else kept in fp32. PackedModel can load and run it.
+    bool save_packed(const std::string& path, int bits, int group = 32) const;
+
     // QAT is applied to linear layers only. bits==0 disables it.
     void set_qat(int bits, int group = 32);
     int qat_bits() const { return qat_bits_; }
@@ -165,6 +169,7 @@ public:
 
     // Used by the quantizer (Phase 5) and tests.
     std::vector<Linear*> linears();
+    std::vector<const Linear*> linears() const;
     std::vector<Param*> params();
 
     long long step() const { return step_; }
@@ -185,6 +190,61 @@ private:
     ForwardCache cache_;
 
     friend struct PackedModel;
+};
+
+// ---------------------------------------------------------------------------
+// Packed (quantized) inference model
+// ---------------------------------------------------------------------------
+
+struct PackedLinear {
+    int out = 0;
+    int in = 0;
+    int bits = 0;
+    int group = 32;
+    std::vector<uint8_t> q;      // packed two's-complement values, row-major
+    std::vector<float> scales;   // [out, groups]
+    std::vector<float> bias;     // [out]
+
+    int groups() const {
+        if (group <= 0 || in <= 0) return 0;
+        return (in + group - 1) / group;
+    }
+    size_t packed_bytes() const {
+        if (bits <= 0 || out <= 0 || in <= 0) return 0;
+        return (static_cast<size_t>(out) * in * bits + 7) / 8;
+    }
+};
+
+struct PackedLayer {
+    Tensor ln1_gamma, ln1_beta, ln2_gamma, ln2_beta;
+    PackedLinear wq, wk, wv, wo, w1, w2;
+};
+
+class PackedModel {
+public:
+    // Loads a file written by GPT::save_packed.
+    bool load(const std::string& path);
+
+    const ModelConfig& config() const { return cfg_; }
+    int bits() const { return bits_; }
+    int group() const { return group_; }
+    int64_t param_count() const { return cfg_.param_count(); }
+
+    // Forward pass used by generation and tests. Fills logits().
+    void forward(const int* tokens, int B, int T) const;
+    const Tensor& logits() const { return cache_.logits; }
+
+    std::vector<int> generate(const std::vector<int>& prompt, int max_new,
+                              float temperature, int top_k, float top_p,
+                              uint64_t seed = 42) const;
+
+private:
+    ModelConfig cfg_;
+    int bits_ = 0;
+    int group_ = 32;
+    Tensor wte_, wpe_, lnf_g_, lnf_b_;
+    std::vector<PackedLayer> layers_;
+    mutable ForwardCache cache_;
 };
 
 // ---------------------------------------------------------------------------

@@ -36,6 +36,7 @@ class ModelStore(context: Context) {
     fun lastCheckpoint(id: String): File = File(checkpointsDir(id), "last.mfck")
     fun bestCheckpoint(id: String): File = File(checkpointsDir(id), "best.mfck")
     fun packedDir(id: String): File = File(modelDir(id), "packed").apply { mkdirs() }
+    fun packedFile(id: String, bits: Int): File = File(packedDir(id), "model_q$bits.mfpk")
     fun dataDir(id: String): File = File(modelDir(id), "data").apply { mkdirs() }
     fun tokenCacheFile(id: String): File = File(dataDir(id), "tokens.bin")
     fun tokenCacheManifestFile(id: String): File = File(dataDir(id), "tokens_manifest.json")

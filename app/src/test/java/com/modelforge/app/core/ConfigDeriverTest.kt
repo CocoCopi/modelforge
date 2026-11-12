@@ -59,6 +59,34 @@ class ConfigDeriverTest {
     }
 
     @Test
+    fun packedSizeMatchesCppFileLayout() {
+        val cfg = ModelConfig(
+            vocabSize = 4096,
+            contextLength = 256,
+            dModel = 256,
+            layers = 6,
+            heads = 8,
+            dFf = 1024
+        )
+        val d = cfg.dModel.toLong()
+        val df = cfg.dFf.toLong()
+        val gs = 32L
+        val linear = cfg.linearWeightCount()
+        val nonLinear = cfg.paramCount() - linear
+        val scales = cfg.layers * (
+            4 * d * ((d + gs - 1) / gs) +
+                df * ((d + gs - 1) / gs) +
+                d * ((df + gs - 1) / gs)
+            )
+        for (bits in intArrayOf(2, 3, 4, 8)) {
+            val packed = (linear * bits + 7) / 8
+            val expected = nonLinear * 4L + scales * 4L + packed
+            assertEquals("bits=$bits", expected, cfg.packedExportBytes(bits, 32))
+            assertTrue(cfg.packedExportBytes(bits, 32) < cfg.fp32Bytes())
+        }
+    }
+
+    @Test
     fun packingShrinksWithFewerBits() {
         val result = ConfigDeriver.derive(10_000_000L)
         val cfg = result.config

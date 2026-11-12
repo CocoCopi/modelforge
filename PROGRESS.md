@@ -114,3 +114,29 @@ Measured locally with the host C++ build: the new optimizer-resume check loads
 Not yet covered here: the Compose training screen (Phase 6) is what will start
 this service and render the live state; this phase verifies the service, native
 resume path and support logic.
+
+## Phase 5 - quantized packed export and inference
+
+Status: implemented, awaiting CI green.
+
+- `GPT::save_packed` writes a deployment file (`MFPK`): config header, fp32
+  embeddings/norms/biases/tied embedding head, and 2/3/4/8-bit symmetric
+  per-group quantized linear weights with fp32 scales. Layout matches
+  `ModelConfig.packedExportBytes` exactly (unit tested).
+- `PackedModel` loads the packed file and runs forward/greedy/sampling inference
+  without dequantizing whole weight matrices to fp32 at rest. Linear products
+  decode the packed values per group and apply the fp32 scale.
+- JNI and Kotlin wrappers: `NativeModel.savePacked`, `NativeBridge` packed
+  functions, and `PackedModel` (load/config/generate/close). `ModelStore` owns
+  `packed/model_q<bits>.mfpk`. The export UI itself lands in Phase 7.
+- Invalid bit widths are rejected; the C++ test also checks the exact file size
+  and that packed logits match QAT reference logits.
+
+Measured locally (host g++ build, same 64-wide 2-layer test model):
+
+- 8-bit: 100,420 bytes, max logit difference 0.0000002, 0 argmax mismatches.
+- 4-bit: 67,652 bytes, max logit difference 0.0000002, 0 argmax mismatches.
+- 2-bit: 51,268 bytes, max logit difference 0.0000001, 0 argmax mismatches.
+- Greedy generation after a packed 8-bit load matched the QAT model exactly.
+- The fp32 weights-only checkpoint for the same model would be about 289 KB, so
+  the 4-bit export is roughly 4.3x smaller.
