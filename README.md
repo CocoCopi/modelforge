@@ -9,9 +9,9 @@ quantization-aware training, writes checkpoints, and exports packed 2/3/4/8-bit
 models. The playground generates text from either the full-precision checkpoint
 or a packed export and can share the packed file.
 
-Status: feature-complete through the playground (Phase 7 in `PROGRESS.md`).
-The repository builds and tests on GitHub Actions; the current output is a
-debug APK. See [Honest limitations](#honest-limitations) before trying it.
+Status: v2.0.0 production build. The repository builds and tests on GitHub
+Actions and publishes a signed release APK/AAB. See
+[Honest limitations](#honest-limitations) before relying on model quality.
 
 ## Features
 
@@ -32,11 +32,22 @@ debug APK. See [Honest limitations](#honest-limitations) before trying it.
 - **Packed deployment format** - `MFPK` file with fp32 embeddings/norms/biases/
   tied head and packed linear weights plus fp32 scales; packed inference decodes
   groups on the fly instead of materializing fp32 matrices.
-- **Compose UI** - four-step wizard, live training dashboard with a loss chart
-  and samples, model details, and a playground with prompt/temperature/top-k/
-  top-p controls, measured tokens/second, export and share.
-- **Encrypted token storage** - optional Hugging Face token in
-  `EncryptedSharedPreferences`; no telemetry and no token logging.
+- **Compose UI** - interactive model wizard, live training dashboard with a
+  loss chart and samples, model details, an identity check and a playground with
+  prompt/temperature/top-k/top-p controls, measured tokens/second, export and
+  share.
+- **NVIDIA AI architect** - optional hosted planning using
+  `minimaxai/minimax-m3.1-flash`. It proposes an overview, datasets, rows, mix
+  weights and training settings; every dataset is checked against Hugging Face
+  before download. The NVIDIA key is encrypted on device and never logged.
+- **Three architecture paths** - traditional transformer (trainable), NCM
+  (planning-only) and AI-designed architecture (planning-only), with honest
+  gating so the wizard never claims to train an engine that does not exist.
+- **Modalities and languages** - text, image, audio, video and documents can be
+  planned; native training is still text-to-text. Tamil is supported in the
+  language list and identity templates.
+- **Encrypted credentials** - optional Hugging Face and NVIDIA keys in
+  `EncryptedSharedPreferences`; no telemetry and no key logging.
 
 ## Honest limitations
 
@@ -46,19 +57,26 @@ debug APK. See [Honest limitations](#honest-limitations) before trying it.
 - 2-bit and 3-bit exports are experimental; 4-bit is the recommended default.
 - Training time and memory vary a lot by phone. The app reports measured
   tokens/second, RAM and an ETA instead of guessing.
-- The current CI output is a debug APK (debug signing), not a Play Store release.
-- The Compose screens are compiled into the APK but have not yet been exercised
-  on a physical device in this repository's CI. Native engine behaviour,
-  checkpoint resume and packed inference are covered by host C++ tests.
+- The Compose screens are compiled into the release APK but have not yet been
+  exercised on a physical device in this repository's CI. Native engine
+  behaviour, checkpoint resume and packed inference are covered by host C++
+  tests.
+- NCM and the AI-designed architecture are planning paths only; they have no
+  native trainer yet.
 
-## Install (current development build)
+## Install (v2.0.0)
 
-1. Open the latest green **Build** run in the repository's Actions tab.
-2. Download the `modelforge-debug-apk` artifact.
-3. Unzip it and install `app-debug.apk` on an arm64 Android 8.0+ phone, for
-   example `adb install app-debug.apk`.
+1. Open [Releases](https://github.com/CocoCopi/modelforge/releases) and download
+   the latest `ModelForge-2.0.0-arm64.apk` directly.
+2. Install it on an arm64 Android 8.0+ phone, for example
+   `adb install ModelForge-2.0.0-arm64.apk`.
+3. If an older development build is installed, uninstall it once. Older CI
+   builds used an ephemeral debug certificate.
 4. Allow the notification permission when prompted so training controls are
    visible in the notification shade.
+
+The release APK is signed with the project's stable release key. The matching
+AAB is attached for store distribution.
 
 ## Using the app
 
@@ -88,15 +106,19 @@ Requirements: JDK 17, Android SDK platform 34, build-tools 34.0.0, NDK
 # ARM64 debug APK
 ./gradlew assembleDebug
 
+# Signed production APK and AAB (requires MF_KEYSTORE_PATH and passwords)
+./gradlew assembleRelease bundleRelease
+
 # Host C++ tests: config, gradient check, overfit, optimizer resume, packed export
 cmake -S app/src/main/cpp -B build-native -DCMAKE_BUILD_TYPE=Release
 cmake --build build-native -j"$(nproc)"
 ctest --test-dir build-native --output-on-failure
 ```
 
-CI (`.github/workflows/build.yml`) runs the host C++ tests, JVM tests and
-`assembleDebug` on every push, then uploads the debug APK artifact. The same
-workflow is the source of truth for "green".
+CI (`.github/workflows/build.yml`) runs the host C++ tests, JVM tests,
+`assembleDebug`, `assembleRelease` and `bundleRelease` on every push, verifies
+the release signature, and uploads the debug APK, release APK, AAB and R8
+mapping. The same workflow is the source of truth for "green".
 
 ## Measured results
 
@@ -145,15 +167,18 @@ checkpoints. The packed file layout is mirrored exactly by
   the dataset card and respecting its terms.
 - The only network traffic is to Hugging Face for search, metadata, dataset rows
   and optional gated access. There is no analytics or crash upload.
-- The Hugging Face token, if saved, is encrypted on device and never written to
-  logs or committed. All models and datasets remain in app-private storage.
+- The Hugging Face token and NVIDIA API key, if saved, are encrypted on device
+  and never written to logs or committed. All models and datasets remain in
+  app-private storage. See `PRIVACY.md`.
 
 ## Known gaps
 
 - Physical-device UI verification and timing measurements are still pending.
-- Release signing/proguard and an app icon are not configured yet.
-- No Compose UI tests yet; native and JVM logic have automated coverage.
+- No Compose instrumentation UI tests yet; native, JVM and Paparazzi logic have
+  automated coverage.
 - Export currently targets the best checkpoint; there is no separate
   fine-tune/merge workflow.
+- NCM and AI-designed architectures remain planning-only until native engines
+  and tests exist.
 
 See `PROGRESS.md` for the phase-by-phase record and the exact CI run IDs.

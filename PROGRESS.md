@@ -438,3 +438,19 @@ Status: IN PROGRESS - release signing, R8, launcher icon and release artifacts.
 - Added adaptive launcher icon and light splash/window colours.
 - Enabled R8 code shrinking, resource shrinking and conservative keep rules for
   JNI, persisted JSON models, Retrofit and kotlinx.serialization.
+
+## Production release v2.0.0
+
+Status: DONE - CI run 43269569997 green.
+
+- Stable project signing key is injected only from GitHub Actions secrets; the
+  debug and release APKs share a consistent certificate for future updates.
+- `versionCode 2`, `versionName 2.0.0`; adaptive launcher icon and light
+  splash/window colours added.
+- Release build uses R8 code shrinking and resource shrinking with keep rules
+  for JNI, persisted JSON, Retrofit and kotlinx.serialization. The release APK
+  is about 3.5 MB versus about 20 MB for the debug build.
+- CI now builds and verifies `app-release.apk`, `app-release.aab`, and uploads
+  the R8 mapping alongside the debug APK.
+- Release APK verified: package `com.modelforge.app`, version 2.0.0, minSdk 26,
+  arm64-v8a, v2 signature, debuggable false, cleartext disabled.
