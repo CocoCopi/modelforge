@@ -83,7 +83,8 @@ Status: DONE - CI run 43150773713 green.
 
 ## Phase 4 - on-device training service, checkpoints and resume
 
-Status: implemented, awaiting CI green.
+Status: DONE - CI run 43152727996 green (host native tests incl. optimizer resume,
+JVM tests and debug APK).
 
 - Foreground service (`TrainingService`, `dataSync` type) with a low-importance
   notification showing step progress, measured loss, tokens/second, RAM, battery,
