@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ModelForge</string>
+    <string name="training_channel_name">Model training</string>
+    <string name="training_channel_description">Runs model training in the background</string>
+</resources>
