@@ -1,0 +1,43 @@
+name: Record screenshots
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools"
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Record Paparazzi snapshots
+        env:
+          PAPARAZZI_RECORD: "true"
+        run: ./gradlew recordPaparazziDebug --stacktrace --no-daemon
+
+      - name: Upload snapshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: paparazzi-snapshots
+          path: app/src/test/snapshots
+          if-no-files-found: error
