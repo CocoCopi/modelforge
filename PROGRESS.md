@@ -37,7 +37,7 @@ Nothing in this phase claims to train or generate text yet.
 
 ## Phase 2 - C++ engine + JNI bridge
 
-Status: implemented, awaiting CI green.
+Status: DONE - CI run 43150152809 green (host CTest + unit tests + debug APK).
 
 - From-scratch GPT: token/position embeddings, causal multi-head attention,
   MLP with tanh-GELU, LayerNorm, tied output head, manual backward pass,
@@ -63,7 +63,7 @@ Measured locally (aarch64 host build, g++ -O2):
 
 ## Phase 3 - tokenizer, Hugging Face search and dataset download
 
-Status: implemented, awaiting CI green.
+Status: DONE - CI run 43150773713 green.
 
 - Byte-level BPE tokenizer in Kotlin: 256 byte tokens plus learned merges,
   whitespace-preserving chunk training with frequency weighting, deterministic
@@ -80,3 +80,36 @@ Status: implemented, awaiting CI green.
 - EncryptedSharedPreferences token store (no plaintext fallback).
 - JVM tests cover BPE round trips/determinism plus a live integration test
   against roneneldan/TinyStories (search, license, structure, 3-row download).
+
+## Phase 4 - on-device training service, checkpoints and resume
+
+Status: implemented, awaiting CI green.
+
+- Foreground service (`TrainingService`, `dataSync` type) with a low-importance
+  notification showing step progress, measured loss, tokens/second, RAM, battery,
+  ETA and thermal state. Notification actions pause/resume and stop training.
+- Partial wake lock only while actually training. The service pauses itself when
+  battery drops below 15% or the thermal status reaches SEVERE, releases the wake
+  lock, and resumes automatically when conditions are safe again.
+- Durable resume: `active_training.json`, live state (`training_state.json`),
+  `START_STICKY`, and a boot receiver (also handles package updates) restart an
+  interrupted run when `autoResume` is enabled.
+- Training pipeline: weighted dataset mixing, deterministic BPE training cache,
+  token-id cache (`tokens.bin` + signature manifest), linear warmup + cosine LR
+  schedule, automatic batch lowering from a RAM estimate, and a sample generation
+  every N steps.
+- Checkpoints every N steps: `last.mfck` includes AdamW state for exact resume;
+  `best.mfck` is weights-only for export. Save is atomic. If a native training
+  step fails (JNI now returns a negative error sentinel), the batch is halved and
+  training reloads the last checkpoint; repeated failure produces a readable error
+  with a suggested fix.
+- Persistence models (`ModelManifest`, `ModelStore`) and JVM tests for LR schedule,
+  memory guard, dataset mixer, token cache, JSON round trips and the live state bus.
+
+Measured locally with the host C++ build: the new optimizer-resume check loads
+`last.mfck`, continues at step 601, and reproduces the reference loss exactly
+(0.000635 vs 0.000635). Gradient check and overfit numbers are unchanged.
+
+Not yet covered here: the Compose training screen (Phase 6) is what will start
+this service and render the live state; this phase verifies the service, native
+resume path and support logic.

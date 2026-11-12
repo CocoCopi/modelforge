@@ -96,6 +96,32 @@ object HardwareDetector {
         return if (level >= 0 && scale > 0) level * 100 / scale else -1
     }
 
+    fun batteryTemperatureC(context: Context): Float? {
+        val intent = context.registerReceiver(
+            null,
+            IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        ) ?: return null
+        val tenths = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)
+        return if (tenths == Int.MIN_VALUE) null else tenths / 10.0f
+    }
+
+    fun availableRamBytes(context: Context): Long {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val mi = ActivityManager.MemoryInfo()
+        am.getMemoryInfo(mi)
+        return mi.availMem
+    }
+
+    fun processRssMb(): Long {
+        return try {
+            val line = File("/proc/self/status").readLines().firstOrNull { it.startsWith("VmRSS:") }
+            val kb = line?.split(Regex("\\s+"))?.getOrNull(1)?.toLongOrNull() ?: 0L
+            kb / 1024L
+        } catch (_: Exception) {
+            0L
+        }
+    }
+
     fun thermalStatus(context: Context): String {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return "unknown (Android < 10)"
         val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return "unknown"

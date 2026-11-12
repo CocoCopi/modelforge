@@ -75,6 +75,38 @@ int main() {
     }
     std::printf("generated tokens:");
     for (int t : a) std::printf(" %d", t);
-    std::printf("\noverfit + checkpoint test passed\n");
+
+    // Full checkpoint (weights + AdamW state) must resume at the same step and
+    // reproduce the same loss for the same batch, which proves the optimizer
+    // state survived the round trip.
+    const std::string optPath = "/tmp/modelforge_overfit_opt_test.mfck";
+    if (!model.save_checkpoint(optPath, true)) {
+        std::fprintf(stderr, "FAIL: optimizer checkpoint save\n");
+        return 1;
+    }
+    GPT resumed;
+    if (!resumed.load_checkpoint(optPath, true)) {
+        std::remove(optPath.c_str());
+        std::fprintf(stderr, "FAIL: optimizer checkpoint load\n");
+        return 1;
+    }
+    std::remove(optPath.c_str());
+    if (resumed.step() != model.step()) {
+        std::fprintf(stderr, "FAIL: resumed step %lld != saved step %lld\n",
+                     static_cast<long long>(resumed.step()),
+                     static_cast<long long>(model.step()));
+        return 1;
+    }
+    const float refLoss = model.train_step(tokens.data(), targets.data(), B, T, 0.0f, 0.0f);
+    const float resumedLoss = resumed.train_step(tokens.data(), targets.data(), B, T, 0.0f, 0.0f);
+    if (!std::isfinite(refLoss) || !std::isfinite(resumedLoss) ||
+        std::fabs(refLoss - resumedLoss) > 1e-3f) {
+        std::fprintf(stderr, "FAIL: optimizer resume loss mismatch %.6f vs %.6f\n",
+                     refLoss, resumedLoss);
+        return 1;
+    }
+    std::printf("\noptimizer resume loss %.6f == %.6f at step %lld\n",
+                refLoss, resumedLoss, static_cast<long long>(resumed.step()));
+    std::printf("overfit + checkpoint test passed\n");
     return 0;
 }
