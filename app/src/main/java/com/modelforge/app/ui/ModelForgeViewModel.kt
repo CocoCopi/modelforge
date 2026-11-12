@@ -33,6 +33,7 @@ import java.io.File
 sealed class Screen {
     object Home : Screen()
     object Wizard : Screen()
+    object Gallery : Screen()
     data class Training(val modelId: String) : Screen()
     data class ModelDetail(val modelId: String) : Screen()
     data class Playground(val modelId: String) : Screen()
@@ -121,6 +122,8 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _playground = MutableStateFlow(PlaygroundState())
     val playground: StateFlow<PlaygroundState> = _playground.asStateFlow()
+
+    fun openGallery() { _screen.value = Screen.Gallery }
 
     fun manifest(id: String): ModelManifest? = store.loadManifest(id)
 

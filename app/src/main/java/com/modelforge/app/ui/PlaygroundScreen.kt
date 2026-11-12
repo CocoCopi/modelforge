@@ -2,21 +2,22 @@ package com.modelforge.app.ui
 
 import android.content.Context
 import android.content.Intent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -26,15 +27,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
-import com.modelforge.app.ui.theme.ForgeAccent
-import com.modelforge.app.ui.theme.ForgeBlue
-import com.modelforge.app.ui.theme.ForgeDanger
-import com.modelforge.app.ui.theme.ForgeMuted
-import com.modelforge.app.ui.theme.ForgeWarning
 import java.io.File
+import com.modelforge.app.ui.design.ForgeButton
+import com.modelforge.app.ui.design.ForgeOutlineButton
+import com.modelforge.app.ui.theme.ForgeColors
+import com.modelforge.app.ui.theme.ForgeType
 
 @Composable
 fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
@@ -49,8 +48,8 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
     ) {
         if (manifest == null) {
             Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("This model's manifest is missing.", color = ForgeDanger)
-                OutlinedButton(onClick = vm::goHome) { Text("Back to models") }
+                Text("This model's manifest is missing.", color = ForgeColors.error)
+                ForgeOutlineButton("Back to models", onClick = vm::goHome)
             }
             return@ForgeScaffold
         }
@@ -59,20 +58,20 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp),
+                .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             SectionCard("Source") {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(
+                    Choice(
+                        text = "Best checkpoint",
                         selected = state.mode == PlaygroundState.MODE_CHECKPOINT,
-                        onClick = { vm.updatePlaygroundMode(PlaygroundState.MODE_CHECKPOINT) },
-                        label = { Text("Best checkpoint") }
+                        onClick = { vm.updatePlaygroundMode(PlaygroundState.MODE_CHECKPOINT) }
                     )
-                    FilterChip(
+                    Choice(
+                        text = "Packed",
                         selected = state.mode == PlaygroundState.MODE_PACKED,
-                        onClick = { vm.updatePlaygroundMode(PlaygroundState.MODE_PACKED) },
-                        label = { Text("Packed") }
+                        onClick = { vm.updatePlaygroundMode(PlaygroundState.MODE_PACKED) }
                     )
                 }
 
@@ -80,17 +79,17 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
                     Text(
                         "Packed bits",
                         style = MaterialTheme.typography.labelMedium,
-                        color = ForgeMuted
+                        color = ForgeColors.inkMuted
                     )
                     Row(
                         modifier = Modifier.horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         listOf(2, 3, 4, 8).forEach { bits ->
-                            FilterChip(
+                            Choice(
+                                text = "$bits-bit",
                                 selected = state.bits == bits,
-                                onClick = { vm.updatePlaygroundBits(bits) },
-                                label = { Text("$bits-bit") }
+                                onClick = { vm.updatePlaygroundBits(bits) }
                             )
                         }
                     }
@@ -98,25 +97,24 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
                     InfoRow(
                         "Packed file",
                         if (packedSize > 0) formatBytes(packedSize) else "not exported yet",
-                        if (packedSize > 0) ForgeAccent else ForgeMuted
+                        if (packedSize > 0) ForgeColors.emberText else ForgeColors.inkMuted
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
+                        ForgeButton(
+                            "Export ${state.bits}-bit",
                             onClick = vm::exportPacked,
                             enabled = !state.busy,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Export ${state.bits}-bit")
-                        }
+                            modifier = Modifier.weight(1f),
+                            primary = true
+                        )
                         if (packedSize > 0) {
-                            OutlinedButton(
+                            ForgeOutlineButton(
+                                "Share file",
                                 onClick = {
                                     sharePacked(context, vm.packedFile(modelId, state.bits))
                                 },
                                 modifier = Modifier.weight(1f)
-                            ) {
-                                Text("Share file")
-                            }
+                            )
                         }
                     }
                     Text(
@@ -124,20 +122,20 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
                             "expanding the whole matrix to fp32. 4-bit is usually the best " +
                             "size/quality tradeoff.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = ForgeMuted
+                        color = ForgeColors.inkMuted
                     )
                 } else {
                     val bestMb = vm.checkpointMegabytes(modelId).second
                     InfoRow(
                         "Best checkpoint",
                         if (bestMb > 0) "$bestMb MB" else "missing",
-                        if (bestMb > 0) ForgeAccent else ForgeWarning
+                        if (bestMb > 0) ForgeColors.emberText else ForgeColors.ochreInk
                     )
                     Text(
                         "Uses the full-precision weights-only checkpoint saved during training. " +
                             "No export step is needed, but the file is larger than a packed export.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = ForgeMuted
+                        color = ForgeColors.inkMuted
                     )
                 }
             }
@@ -154,7 +152,7 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
                 Text(
                     "Max new tokens: ${state.maxNew}",
                     style = MaterialTheme.typography.labelMedium,
-                    color = ForgeMuted
+                    color = ForgeColors.inkMuted
                 )
                 Slider(
                     value = state.maxNew.toFloat(),
@@ -165,7 +163,7 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
                 Text(
                     "Temperature: ${String.format("%.2f", state.temperature)}",
                     style = MaterialTheme.typography.labelMedium,
-                    color = ForgeMuted
+                    color = ForgeColors.inkMuted
                 )
                 Slider(
                     value = state.temperature,
@@ -176,7 +174,7 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
                 Text(
                     "Top-k: ${state.topK}",
                     style = MaterialTheme.typography.labelMedium,
-                    color = ForgeMuted
+                    color = ForgeColors.inkMuted
                 )
                 Slider(
                     value = state.topK.toFloat(),
@@ -187,7 +185,7 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
                 Text(
                     "Top-p: ${String.format("%.2f", state.topP)}",
                     style = MaterialTheme.typography.labelMedium,
-                    color = ForgeMuted
+                    color = ForgeColors.inkMuted
                 )
                 Slider(
                     value = state.topP,
@@ -195,27 +193,27 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
                     valueRange = 0.05f..1f,
                     steps = 18
                 )
-                Button(
+                ForgeButton(
+                    if (state.mode == PlaygroundState.MODE_PACKED) "Generate from packed" else "Generate",
                     onClick = vm::generatePlayground,
                     enabled = !state.busy && state.prompt.isNotBlank(),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(if (state.mode == PlaygroundState.MODE_PACKED) "Generate from packed" else "Generate")
-                }
+                    modifier = Modifier.fillMaxWidth(),
+                    primary = true
+                )
                 if (state.busy) {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Text("generating…", style = ForgeType.mono, color = ForgeColors.emberText)
                     if (state.status.isNotBlank()) {
                         Text(
                             state.status,
                             style = MaterialTheme.typography.bodySmall,
-                            color = ForgeBlue
+                            color = ForgeColors.verdigris
                         )
                     }
                 }
             }
 
             if (state.error != null) {
-                Text(state.error.orEmpty(), color = ForgeDanger, style = MaterialTheme.typography.bodyMedium)
+                Text(state.error.orEmpty(), color = ForgeColors.error, style = MaterialTheme.typography.bodyMedium)
             }
 
             if (state.output.isNotBlank()) {
@@ -223,17 +221,16 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
                     SelectionContainer {
                         Text(
                             state.output,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontFamily = FontFamily.Monospace
+                            style = ForgeType.mono
                         )
                     }
                     InfoRow("Generated tokens", state.generatedTokens.toString())
-                    InfoRow("Speed", formatTokensPerSecond(state.tokensPerSec), ForgeAccent)
+                    InfoRow("Speed", formatTokensPerSecond(state.tokensPerSec), ForgeColors.emberText)
                     Text(
                         "These models are trained from scratch on a phone. Repeating phrases " +
                             "and shaky grammar are expected; lower the temperature for safer text.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = ForgeMuted
+                        color = ForgeColors.inkMuted
                     )
                 }
             }
@@ -256,5 +253,32 @@ private fun sharePacked(context: Context, file: File) {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         context.startActivity(Intent.createChooser(intent, "Share ${file.name}"))
+    }
+}
+
+@Composable
+private fun Choice(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    androidx.compose.foundation.layout.Box(
+        modifier = modifier
+            .heightIn(min = 40.dp)
+            .background(
+                if (selected) ForgeColors.inkWash else ForgeColors.surface,
+                RoundedCornerShape(4.dp)
+            )
+            .border(
+                1.dp,
+                if (selected) ForgeColors.emberText else ForgeColors.hairline,
+                RoundedCornerShape(4.dp)
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        contentAlignment = androidx.compose.ui.Alignment.Center
+    ) {
+        Text(text, style = MaterialTheme.typography.labelLarge, color = if (selected) ForgeColors.emberText else ForgeColors.ink)
     }
 }

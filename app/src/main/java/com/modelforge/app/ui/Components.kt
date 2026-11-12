@@ -1,31 +1,21 @@
 package com.modelforge.app.ui
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -34,21 +24,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.modelforge.app.core.ConfigDeriver
 import com.modelforge.app.data.TrainingStatus
-import com.modelforge.app.ui.theme.ForgeAccent
-import com.modelforge.app.ui.theme.ForgeBlue
-import com.modelforge.app.ui.theme.ForgeDanger
-import com.modelforge.app.ui.theme.ForgeMuted
-import com.modelforge.app.ui.theme.ForgeSurface
-import com.modelforge.app.ui.theme.ForgeSurfaceHigh
-import com.modelforge.app.ui.theme.ForgeWarning
-import kotlin.math.max
+import com.modelforge.app.ui.design.ForgeButton
+import com.modelforge.app.ui.design.ForgeOutlineButton
+import com.modelforge.app.ui.design.Hairline
+import com.modelforge.app.ui.design.LedgerChart
+import com.modelforge.app.ui.design.LedgerStat
+import com.modelforge.app.ui.design.NotebookCard
+import com.modelforge.app.ui.design.SmallCaps
+import com.modelforge.app.ui.theme.ForgeColors
+import com.modelforge.app.ui.theme.ForgeType
 
 @Composable
 fun ForgeScaffold(
@@ -61,45 +50,50 @@ fun ForgeScaffold(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
+            .background(ForgeColors.paper)
             .safeDrawingPadding()
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 20.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            if (onBack != null) {
-                IconButton(onClick = onBack) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
-                        tint = MaterialTheme.colorScheme.onBackground
-                    )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    if (onBack != null) {
+                        ForgeOutlineButton("← Back", onClick = onBack)
+                    }
+                    SmallCaps("MODELFORGE / WORKBENCH")
                 }
+                actions()
             }
-            Column(modifier = Modifier.weight(1f)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.displaySmall,
+                color = ForgeColors.ink,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (!subtitle.isNullOrBlank()) {
                 Text(
-                    title,
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = ForgeAccent,
-                    maxLines = 1,
+                    subtitle,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = ForgeColors.inkMuted,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
-                if (!subtitle.isNullOrBlank()) {
-                    Text(
-                        subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = ForgeMuted,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
             }
-            actions()
         }
-        Box(Modifier.fillMaxWidth().height(1.dp).background(MaterialTheme.colorScheme.outline))
+        Hairline()
         Box(Modifier.weight(1f).fillMaxWidth()) {
             content()
         }
@@ -112,55 +106,35 @@ fun SectionCard(
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = ForgeSurface)
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            if (title != null) {
-                Text(title, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
-            }
-            content()
+    NotebookCard(modifier = modifier) {
+        if (title != null) {
+            SmallCaps(title)
+            Hairline(color = ForgeColors.hairlineSoft)
         }
+        content()
     }
 }
 
 @Composable
-fun InfoRow(label: String, value: String, valueColor: Color = MaterialTheme.colorScheme.onSurface) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(label, style = MaterialTheme.typography.bodyMedium, color = ForgeMuted)
-        Text(
-            value,
-            style = MaterialTheme.typography.bodyMedium,
-            color = valueColor,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
-    }
+fun InfoRow(label: String, value: String, valueColor: Color = ForgeColors.ink) {
+    LedgerStat(label, value, valueColor = valueColor)
 }
 
 @Composable
 fun MetricTile(
     label: String,
     value: String,
-    accent: Color = ForgeAccent,
+    accent: Color = ForgeColors.ink,
     modifier: Modifier = Modifier
 ) {
     Column(
         modifier = modifier
-            .background(ForgeSurfaceHigh, RoundedCornerShape(12.dp))
-            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .background(ForgeColors.surface, RoundedCornerShape(4.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Text(label, style = MaterialTheme.typography.labelSmall, color = ForgeMuted)
-        Text(value, style = MaterialTheme.typography.titleMedium, color = accent, maxLines = 1)
+        SmallCaps(label)
+        Text(value, style = ForgeType.monoLarge, color = accent, maxLines = 1)
     }
 }
 
@@ -174,18 +148,15 @@ fun DropdownSelector(
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box(modifier = modifier) {
-        OutlinedButton(onClick = { expanded = true }) {
-            Text(
-                selected.ifBlank { label },
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Icon(Icons.Filled.ArrowDropDown, contentDescription = null)
-        }
+        ForgeOutlineButton(
+            text = selected.ifBlank { label },
+            onClick = { expanded = true },
+            modifier = Modifier.widthIn(max = 280.dp)
+        )
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             options.forEach { option ->
                 DropdownMenuItem(
-                    text = { Text(option) },
+                    text = { Text(option, style = MaterialTheme.typography.bodyMedium) },
                     onClick = {
                         onSelect(option)
                         expanded = false
@@ -198,40 +169,7 @@ fun DropdownSelector(
 
 @Composable
 fun LossChart(history: List<Float>, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .background(ForgeSurfaceHigh, RoundedCornerShape(12.dp))
-            .padding(10.dp)
-    ) {
-        if (history.size < 2) {
-            Text(
-                "The loss curve appears after a few steps.",
-                style = MaterialTheme.typography.bodySmall,
-                color = ForgeMuted
-            )
-        } else {
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                val min = history.min()
-                val max = history.max()
-                val range = max(max - min, 1e-6f)
-                var previous: Offset? = null
-                history.forEachIndexed { index, value ->
-                    val x = size.width * index / (history.size - 1).toFloat()
-                    val y = size.height * (1f - (value - min) / range)
-                    val point = Offset(x, y)
-                    previous?.let {
-                        drawLine(
-                            color = ForgeAccent,
-                            start = it,
-                            end = point,
-                            strokeWidth = 3f
-                        )
-                    }
-                    previous = point
-                }
-            }
-        }
-    }
+    LedgerChart(history = history, modifier = modifier)
 }
 
 fun statusLabel(status: String): String = when (status) {
@@ -245,11 +183,11 @@ fun statusLabel(status: String): String = when (status) {
 }
 
 fun statusColor(status: String): Color = when (status) {
-    TrainingStatus.COMPLETED -> ForgeAccent
-    TrainingStatus.ERROR -> ForgeDanger
-    TrainingStatus.PAUSED -> ForgeWarning
-    TrainingStatus.RUNNING, TrainingStatus.PREPARING -> ForgeBlue
-    else -> ForgeMuted
+    TrainingStatus.COMPLETED -> ForgeColors.verdigris
+    TrainingStatus.ERROR -> ForgeColors.error
+    TrainingStatus.PAUSED -> ForgeColors.ochreInk
+    TrainingStatus.RUNNING, TrainingStatus.PREPARING -> ForgeColors.emberText
+    else -> ForgeColors.inkMuted
 }
 
 fun formatDuration(seconds: Long): String {

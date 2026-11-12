@@ -8,11 +8,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -20,16 +17,14 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.modelforge.app.data.TrainingLiveState
 import com.modelforge.app.data.TrainingStatus
-import com.modelforge.app.ui.theme.ForgeAccent
-import com.modelforge.app.ui.theme.ForgeBlue
-import com.modelforge.app.ui.theme.ForgeDanger
-import com.modelforge.app.ui.theme.ForgeMuted
-import com.modelforge.app.ui.theme.ForgeWarning
 import kotlinx.coroutines.delay
+import com.modelforge.app.ui.design.ForgeButton
+import com.modelforge.app.ui.design.ForgeOutlineButton
+import com.modelforge.app.ui.theme.ForgeColors
+import com.modelforge.app.ui.theme.ForgeType
 
 @Composable
 fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
@@ -51,8 +46,8 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
     ) {
         if (manifest == null) {
             Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("This model was deleted or its manifest is missing.", color = ForgeDanger)
-                OutlinedButton(onClick = vm::goHome) { Text("Back to models") }
+                Text("This model was deleted or its manifest is missing.", color = ForgeColors.error)
+                ForgeOutlineButton("Back to models", onClick = vm::goHome)
             }
             return@ForgeScaffold
         }
@@ -67,11 +62,11 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp),
+                .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             SectionCard("Architecture") {
-                InfoRow("Parameters", formatParams(config.paramCount()), ForgeAccent)
+                InfoRow("Parameters", formatParams(config.paramCount()), ForgeColors.emberText)
                 InfoRow("Layers", config.layers.toString())
                 InfoRow("Width", "${config.dModel} (${config.heads} heads × ${config.headDim})")
                 InfoRow("Feed-forward", config.dFf.toString())
@@ -92,13 +87,13 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
                 InfoRow("Speed", formatTokensPerSecond(state?.tokensPerSec ?: 0.0))
                 InfoRow("Elapsed", formatDuration((state?.elapsedMs ?: 0L) / 1000L))
                 if (state?.error != null) {
-                    Text(state!!.error.orEmpty(), color = ForgeDanger)
+                    Text(state!!.error.orEmpty(), color = ForgeColors.error)
                 }
             }
 
             SectionCard("Datasets") {
                 if (manifest.datasets.isEmpty()) {
-                    Text("No datasets recorded.", color = ForgeMuted)
+                    Text("No datasets recorded.", color = ForgeColors.inkMuted)
                 } else {
                     manifest.datasets.forEach { entry ->
                         Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
@@ -108,7 +103,7 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
                                     "${String.format("%.1f", entry.weight)}x • " +
                                     "license ${entry.license ?: "unknown"}",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = if (entry.nonCommercial) ForgeWarning else ForgeMuted
+                                color = if (entry.nonCommercial) ForgeColors.ochreInk else ForgeColors.inkMuted
                             )
                         }
                     }
@@ -117,14 +112,14 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
 
             SectionCard("Storage") {
                 InfoRow("Full-precision estimate", formatBytes(config.fp32Bytes()))
-                InfoRow("Packed estimate (${config.bits}-bit)", formatBytes(estimatedPacked), ForgeAccent)
+                InfoRow("Packed estimate (${config.bits}-bit)", formatBytes(estimatedPacked), ForgeColors.emberText)
                 InfoRow("Last checkpoint", if (checkpoints.first > 0) "${checkpoints.first} MB" else "none")
                 InfoRow("Best checkpoint", if (checkpoints.second > 0) "${checkpoints.second} MB" else "none")
                 Text(
                     "The packed estimate uses the exact export layout. Actual files are written " +
                         "when you export from the playground.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = ForgeMuted
+                    color = ForgeColors.inkMuted
                 )
             }
 
@@ -134,53 +129,46 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
                     sample.ifBlank {
                         "No sample yet. Samples are written every ${manifest.settings.sampleEvery} steps."
                     },
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontFamily = FontFamily.Monospace,
-                    color = if (sample.isBlank()) ForgeMuted else MaterialTheme.colorScheme.onSurface
+                    style = ForgeType.mono,
+                    color = if (sample.isBlank()) ForgeColors.inkMuted else ForgeColors.ink
                 )
             }
 
             SectionCard("Actions") {
-                if (active) {
-                    Button(onClick = { vm.openTraining(modelId) }, modifier = Modifier.fillMaxWidth()) {
-                        Text("Open live training")
-                    }
-                } else {
-                    Button(onClick = { vm.openTraining(modelId) }, modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            when (status) {
-                                TrainingStatus.COMPLETED -> "Train again"
-                                TrainingStatus.STOPPED, TrainingStatus.ERROR -> "Resume training"
-                                else -> "Start training"
-                            }
-                        )
-                    }
-                }
-                OutlinedButton(
+                ForgeButton(
+                    if (active) "Open live training" else when (status) {
+                        TrainingStatus.COMPLETED -> "Train again"
+                        TrainingStatus.STOPPED, TrainingStatus.ERROR -> "Resume training"
+                        else -> "Start training"
+                    },
+                    onClick = { vm.openTraining(modelId) },
+                    modifier = Modifier.fillMaxWidth(),
+                    primary = true
+                )
+                ForgeOutlineButton(
+                    "Open playground and export",
                     onClick = { vm.openPlayground(modelId) },
                     modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Open playground and export")
-                }
-                OutlinedButton(
+                )
+                ForgeOutlineButton(
+                    "Delete model",
                     onClick = { confirmDelete = true },
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = !active
-                ) {
-                    Text("Delete model", color = ForgeDanger)
-                }
+                    enabled = !active,
+                    tint = ForgeColors.error
+                )
                 if (active) {
                     Text(
                         "Stop training before deleting this model.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = ForgeMuted
+                        color = ForgeColors.inkMuted
                     )
                 }
                 Text(
                     "The playground loads this model's best checkpoint or a packed export, " +
                         "generates text, and shares the packed file through Android's share sheet.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = ForgeBlue
+                    color = ForgeColors.verdigris
                 )
             }
         }
@@ -189,18 +177,19 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
     if (confirmDelete) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
-            title = { Text("Delete ${manifest?.name ?: "model"}?") },
+            containerColor = ForgeColors.surface,
+            title = { Text("Delete ${manifest?.name ?: "model"}?", style = MaterialTheme.typography.headlineSmall) },
             text = {
                 Text("This removes the model, datasets and all checkpoints from this device.")
             },
             confirmButton = {
-                TextButton(onClick = {
+                ForgeButton("Delete", onClick = {
                     confirmDelete = false
                     vm.deleteModel(modelId)
-                }) { Text("Delete", color = ForgeDanger) }
+                })
             },
             dismissButton = {
-                TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
+                ForgeOutlineButton("Cancel", onClick = { confirmDelete = false })
             }
         )
     }

@@ -2,6 +2,7 @@ package com.modelforge.app.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -11,10 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -23,18 +21,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.modelforge.app.data.ModelManifest
 import com.modelforge.app.data.TrainingLiveState
 import com.modelforge.app.data.TrainingStatus
-import com.modelforge.app.ui.theme.ForgeAccent
-import com.modelforge.app.ui.theme.ForgeBlue
-import com.modelforge.app.ui.theme.ForgeDanger
-import com.modelforge.app.ui.theme.ForgeMuted
-import com.modelforge.app.ui.theme.ForgeSurfaceHigh
-import com.modelforge.app.ui.theme.ForgeWarning
 import kotlinx.coroutines.delay
+import com.modelforge.app.ui.design.ForgeButton
+import com.modelforge.app.ui.design.ForgeOutlineButton
+import com.modelforge.app.ui.theme.ForgeColors
+import com.modelforge.app.ui.theme.ForgeType
 
 @Composable
 fun TrainingScreen(vm: ModelForgeViewModel, modelId: String) {
@@ -56,8 +51,8 @@ fun TrainingScreen(vm: ModelForgeViewModel, modelId: String) {
     ) {
         if (manifest == null) {
             Column(Modifier.fillMaxSize().padding(24.dp)) {
-                Text("This model's manifest is missing.", color = ForgeDanger)
-                OutlinedButton(onClick = vm::goHome) { Text("Back to models") }
+                Text("This model's manifest is missing.", color = ForgeColors.error)
+                ForgeOutlineButton("Back to models", onClick = vm::goHome)
             }
             return@ForgeScaffold
         }
@@ -67,7 +62,7 @@ fun TrainingScreen(vm: ModelForgeViewModel, modelId: String) {
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp),
+                .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             ProgressCard(manifest, snapshot)
@@ -86,24 +81,23 @@ fun TrainingScreen(vm: ModelForgeViewModel, modelId: String) {
                     SectionCard("Sample output") {
                         Text(
                             snapshot.sample,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontFamily = FontFamily.Monospace,
+                            style = ForgeType.mono,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .background(ForgeSurfaceHigh, RoundedCornerShape(10.dp))
+                                .background(ForgeColors.inkWash, RoundedCornerShape(4.dp))
                                 .padding(12.dp)
                         )
                         Text(
                             "Greedy-ish sample from the live model. Tiny models repeat and " +
                                 "ramble; that is expected.",
                             style = MaterialTheme.typography.bodySmall,
-                            color = ForgeMuted
+                            color = ForgeColors.inkMuted
                         )
                     }
                 }
             }
             if (snapshot?.error != null) {
-                Text(snapshot?.error.orEmpty(), color = ForgeDanger, style = MaterialTheme.typography.bodyMedium)
+                Text(snapshot?.error.orEmpty(), color = ForgeColors.error, style = MaterialTheme.typography.bodyMedium)
             }
             ControlsCard(vm, modelId, manifest, snapshot)
         }
@@ -119,12 +113,19 @@ private fun ProgressCard(manifest: ModelManifest, state: TrainingLiveState?) {
             "${statusLabel(state?.status ?: "")} • step $step of $total",
             style = MaterialTheme.typography.titleMedium
         )
-        LinearProgressIndicator(
-            progress = (step.toFloat() / total).coerceIn(0f, 1f),
-            modifier = Modifier.fillMaxWidth(),
-            color = statusColor(state?.status ?: ""),
-            trackColor = ForgeSurfaceHigh
-        )
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(3.dp)
+                .background(ForgeColors.hairlineSoft, RoundedCornerShape(2.dp))
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth((step.toFloat() / total).coerceIn(0f, 1f))
+                    .height(3.dp)
+                    .background(statusColor(state?.status ?: ""), RoundedCornerShape(2.dp))
+            )
+        }
         InfoRow("Elapsed", formatDuration((state?.elapsedMs ?: 0L) / 1000L))
         InfoRow("ETA", formatDuration(state?.etaSeconds ?: 0L))
         if (state?.autoPaused == true) {
@@ -132,7 +133,7 @@ private fun ProgressCard(manifest: ModelManifest, state: TrainingLiveState?) {
                 "Training is auto-paused to protect the phone. It resumes when battery and " +
                     "temperature are safe.",
                 style = MaterialTheme.typography.bodySmall,
-                color = ForgeWarning
+                color = ForgeColors.ochreInk
             )
         }
         val message = state?.message.orEmpty()
@@ -140,7 +141,7 @@ private fun ProgressCard(manifest: ModelManifest, state: TrainingLiveState?) {
             Text(
                 message,
                 style = MaterialTheme.typography.bodySmall,
-                color = ForgeMuted
+                color = ForgeColors.inkMuted
             )
         }
     }
@@ -152,10 +153,10 @@ private fun MetricsRow(state: TrainingLiveState) {
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        MetricTile("Loss", formatLoss(state.loss), ForgeAccent, Modifier.weight(1f))
-        MetricTile("Best loss", formatLoss(state.bestLoss), ForgeBlue, Modifier.weight(1f))
-        MetricTile("Speed", formatTokensPerSecond(state.tokensPerSec), ForgeAccent, Modifier.weight(1f))
-        MetricTile("RAM", if (state.ramMb > 0) "${state.ramMb} MB" else "—", ForgeMuted, Modifier.weight(1f))
+        MetricTile("Loss", formatLoss(state.loss), ForgeColors.emberText, Modifier.weight(1f))
+        MetricTile("Best loss", formatLoss(state.bestLoss), ForgeColors.verdigris, Modifier.weight(1f))
+        MetricTile("Speed", formatTokensPerSecond(state.tokensPerSec), ForgeColors.emberText, Modifier.weight(1f))
+        MetricTile("RAM", if (state.ramMb > 0) "${state.ramMb} MB" else "—", ForgeColors.inkMuted, Modifier.weight(1f))
     }
 }
 
@@ -181,41 +182,38 @@ private fun ControlsCard(
     SectionCard("Controls") {
         when {
             active && status == TrainingStatus.PAUSED -> {
-                Button(onClick = vm::resumeTraining, modifier = Modifier.fillMaxWidth()) {
-                    Text("Resume training")
-                }
+                ForgeButton("Resume training", onClick = vm::resumeTraining, modifier = Modifier.fillMaxWidth(), primary = true)
             }
             active -> {
-                OutlinedButton(onClick = vm::pauseTraining, modifier = Modifier.fillMaxWidth()) {
-                    Text("Pause training")
-                }
+                ForgeOutlineButton("Pause training", onClick = vm::pauseTraining, modifier = Modifier.fillMaxWidth())
             }
             else -> {
-                Button(onClick = { vm.openTraining(modelId) }, modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        if (status == TrainingStatus.COMPLETED) "Train again" else "Start training"
-                    )
-                }
-                OutlinedButton(onClick = { vm.openModel(modelId) }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Open model details")
-                }
+                ForgeButton(
+                    if (status == TrainingStatus.COMPLETED) "Train again" else "Start training",
+                    onClick = { vm.openTraining(modelId) },
+                    modifier = Modifier.fillMaxWidth(),
+                    primary = true
+                )
+                ForgeOutlineButton(
+                    "Open model details",
+                    onClick = { vm.openModel(modelId) },
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         }
         if (active) {
-            OutlinedButton(onClick = vm::stopTraining, modifier = Modifier.fillMaxWidth()) {
-                Text("Stop training", color = ForgeDanger)
-            }
+            ForgeOutlineButton("Stop training", onClick = vm::stopTraining, modifier = Modifier.fillMaxWidth(), tint = ForgeColors.error)
             Text(
                 "Training continues if you leave the app. Use the notification to pause or stop.",
                 style = MaterialTheme.typography.bodySmall,
-                color = ForgeMuted
+                color = ForgeColors.inkMuted
             )
         }
         if (status == TrainingStatus.COMPLETED) {
             Text(
                 "Training completed. The best checkpoint is kept for the playground.",
                 style = MaterialTheme.typography.bodySmall,
-                color = ForgeAccent
+                color = ForgeColors.emberText
             )
         }
         InfoRow("Best checkpoint", if (vm.checkpointMegabytes(modelId).second > 0) "saved" else "not yet")
