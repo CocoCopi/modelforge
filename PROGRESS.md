@@ -356,3 +356,28 @@ Status: DONE - CI run 43183528487 green (host native tests, JVM tests,
   the attached data and the fact that samples are tiny-model samples.
 - `ModelCardTest` checks names, creator, licence, languages, identity fraction
   and the responsibility note.
+
+## v2 Phase 7 - background training and live window
+
+Status: DONE - CI run 43210808386 green (host native tests, JVM tests,
+`verifyPaparazziDebug`, debug APK and artifacts).
+
+- The live training screen and model detail now subscribe to `TrainingBus`, so
+  progress, loss, speed, RAM, device state and samples update as the service
+  publishes them instead of polling the disk only at checkpoints. Disk state
+  remains the fallback after a process restart.
+- The service returns `START_REDELIVER_INTENT` for start requests, uses a
+  `specialUse` foreground service type on Android 14+ (data sync below that),
+  and schedules a restart through `TrainingRestartReceiver` from
+  `onTaskRemoved`/`onDestroy` when a model is still active. Boot resume stays.
+- Crash recovery checkpoints are written weights-only every 5 steps up to 5M
+  parameters, 10 steps up to 20M and 20 steps above. They are selected on resume
+  when newer than the full optimizer checkpoint, so a background kill no longer
+  falls back to the last 50-step checkpoint. The UI states honestly when weights
+  were recovered and optimizer state may have restarted.
+- Live state is persisted about once per second, and checkpoint writes run on
+  `Dispatchers.IO` so the training loop is not blocked by file writes.
+- The training screen offers Android's battery-optimisation exemption dialog
+  because some vendors still kill foreground work without it.
+- `RecoveryPolicyTest` covers interval scaling, due checks and little-endian
+  checkpoint step reading.
