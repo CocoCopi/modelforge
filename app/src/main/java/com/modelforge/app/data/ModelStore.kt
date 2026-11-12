@@ -35,6 +35,7 @@ class ModelStore(context: Context) {
     fun checkpointsDir(id: String): File = File(modelDir(id), "checkpoints").apply { mkdirs() }
     fun lastCheckpoint(id: String): File = File(checkpointsDir(id), "last.mfck")
     fun bestCheckpoint(id: String): File = File(checkpointsDir(id), "best.mfck")
+    fun recoveryCheckpoint(id: String): File = File(checkpointsDir(id), "recovery.mfck")
     fun packedDir(id: String): File = File(modelDir(id), "packed").apply { mkdirs() }
     fun packedFile(id: String, bits: Int): File = File(packedDir(id), "model_q$bits.mfpk")
     fun dataDir(id: String): File = File(modelDir(id), "data").apply { mkdirs() }

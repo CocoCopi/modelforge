@@ -13,6 +13,9 @@ import java.io.DataOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.security.MessageDigest
 import kotlin.math.PI
 import kotlin.math.cos
@@ -220,5 +223,52 @@ object TokenCache {
                 TokenCacheManifest(signature, tokens.size, vocabSize)
             )
         )
+    }
+}
+
+object RecoveryPolicy {
+    /**
+     * How often to write a weights-only crash-recovery checkpoint. Full
+     * optimizer checkpoints follow the user's checkpointEvery setting; this is
+     * the smaller safety net that limits how many steps a process kill can lose.
+     */
+    fun intervalFor(params: Long): Int = when {
+        params <= 5_000_000L -> 5
+        params <= 20_000_000L -> 10
+        else -> 20
+    }
+
+    fun isDue(step: Int, totalSteps: Int, interval: Int): Boolean =
+        step >= totalSteps || step % interval.coerceAtLeast(1) == 0
+}
+
+object CheckpointHeader {
+    private const val MAGIC = 0x4D46434B
+    private const val STEP_OFFSET = 36L
+
+    /** Reads the step field from the little-endian MFCK header. */
+    fun readStep(file: File): Long? {
+        if (!file.exists() || file.length() < STEP_OFFSET + 8) return null
+        return runCatching {
+            RandomAccessFile(file, "r").use { input ->
+                input.seek(STEP_OFFSET)
+                val bytes = ByteArray(8)
+                input.readFully(bytes)
+                val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+                val step = buffer.long
+                if (step < 0) null else step
+            }
+        }.getOrNull()
+    }
+
+    fun hasMagic(file: File): Boolean {
+        if (!file.exists() || file.length() < 4) return false
+        return runCatching {
+            RandomAccessFile(file, "r").use { input ->
+                val bytes = ByteArray(4)
+                input.readFully(bytes)
+                ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).int == MAGIC
+            }
+        }.getOrDefault(false)
     }
 }

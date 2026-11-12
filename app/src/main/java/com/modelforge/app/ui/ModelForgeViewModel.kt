@@ -1,6 +1,10 @@
 package com.modelforge.app.ui
 
 import android.app.Application
+import android.content.Intent
+import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.modelforge.app.core.ArchitectureRegistry
@@ -731,6 +735,24 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         runCatching { TrainingService.start(getApplication(), id) }
         _screen.value = Screen.Training(id)
         refreshModels()
+    }
+
+    fun isIgnoringBatteryOptimizations(): Boolean {
+        val power = getApplication<Application>().getSystemService(PowerManager::class.java)
+            ?: return false
+        return power.isIgnoringBatteryOptimizations(getApplication<Application>().packageName)
+    }
+
+    fun requestBatteryExemption() {
+        val app = getApplication<Application>()
+        val direct = Intent(
+            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+            Uri.parse("package:${app.packageName}")
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val fallback = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { app.startActivity(direct) }
+            .onFailure { runCatching { app.startActivity(fallback) } }
     }
 
     fun pauseTraining() = TrainingService.pause(getApplication())

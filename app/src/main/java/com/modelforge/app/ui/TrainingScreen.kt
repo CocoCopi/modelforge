@@ -15,17 +15,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.modelforge.app.data.ModelManifest
 import com.modelforge.app.data.TrainingLiveState
 import com.modelforge.app.data.TrainingStatus
-import kotlinx.coroutines.delay
 import com.modelforge.app.ui.design.ForgeButton
 import com.modelforge.app.ui.design.ForgeOutlineButton
 import com.modelforge.app.ui.theme.ForgeColors
@@ -34,14 +30,7 @@ import com.modelforge.app.ui.theme.ForgeType
 @Composable
 fun TrainingScreen(vm: ModelForgeViewModel, modelId: String) {
     val manifest = remember(modelId) { vm.manifest(modelId) }
-    var state by remember(modelId) { mutableStateOf(vm.liveState(modelId)) }
-
-    LaunchedEffect(modelId) {
-        while (true) {
-            state = vm.liveState(modelId)
-            delay(1000)
-        }
-    }
+    val state = rememberTrainingLiveState(vm, modelId)
 
     val status = state?.status ?: "not started"
     ForgeScaffold(
@@ -99,7 +88,13 @@ fun TrainingScreen(vm: ModelForgeViewModel, modelId: String) {
             if (snapshot?.error != null) {
                 Text(snapshot?.error.orEmpty(), color = ForgeColors.error, style = MaterialTheme.typography.bodyMedium)
             }
-            ControlsCard(vm, modelId, manifest, snapshot)
+            ControlsCard(
+                vm = vm,
+                modelId = modelId,
+                manifest = manifest,
+                state = snapshot,
+                batteryExempt = vm.isIgnoringBatteryOptimizations()
+            )
         }
     }
 }
@@ -175,7 +170,8 @@ private fun ControlsCard(
     vm: ModelForgeViewModel,
     modelId: String,
     manifest: ModelManifest,
-    state: TrainingLiveState?
+    state: TrainingLiveState?,
+    batteryExempt: Boolean
 ) {
     val status = state?.status
     val active = state?.isActive == true
@@ -203,8 +199,22 @@ private fun ControlsCard(
         }
         if (active) {
             ForgeOutlineButton("Stop training", onClick = vm::stopTraining, modifier = Modifier.fillMaxWidth(), tint = ForgeColors.error)
+            if (!batteryExempt) {
+                ForgeOutlineButton(
+                    "Allow background training",
+                    onClick = vm::requestBatteryExemption,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    "Android may still stop long training unless this app is exempt from " +
+                        "battery optimisations. The setting opens in the system dialog.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ForgeColors.ochreInk
+                )
+            }
             Text(
-                "Training continues if you leave the app. Use the notification to pause or stop.",
+                "Training continues if you leave the app. The notification reports real " +
+                    "progress and can pause or stop it.",
                 style = MaterialTheme.typography.bodySmall,
                 color = ForgeColors.inkMuted
             )

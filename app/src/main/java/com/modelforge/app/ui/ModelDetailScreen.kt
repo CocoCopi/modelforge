@@ -12,7 +12,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -22,7 +21,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.modelforge.app.data.TrainingLiveState
 import com.modelforge.app.data.TrainingStatus
-import kotlinx.coroutines.delay
 import com.modelforge.app.ui.design.ForgeButton
 import com.modelforge.app.ui.design.ForgeOutlineButton
 import com.modelforge.app.ui.theme.ForgeColors
@@ -31,17 +29,10 @@ import com.modelforge.app.ui.theme.ForgeType
 @Composable
 fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
     val manifest = remember(modelId) { vm.manifest(modelId) }
-    var state by remember(modelId) { mutableStateOf(vm.liveState(modelId)) }
+    val state = rememberTrainingLiveState(vm, modelId)
     var confirmDelete by remember { mutableStateOf(false) }
     val identity by vm.identityCheck.collectAsState()
     val context = LocalContext.current
-
-    LaunchedEffect(modelId) {
-        while (true) {
-            state = vm.liveState(modelId)
-            delay(1500)
-        }
-    }
 
     ForgeScaffold(
         title = manifest?.name ?: "Model",

@@ -3,12 +3,14 @@ package com.modelforge.app.training
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
+import android.app.AlarmManager
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.os.SystemClock
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -81,6 +83,8 @@ class TrainingService : Service() {
     @Volatile private var paused = false
     @Volatile private var autoPaused = false
     @Volatile private var stopRequested = false
+    @Volatile private var checkpointRequested = false
+    @Volatile private var resumedWithRecovery = false
 
     private var lastNotifyAt = 0L
     private var lastPersistAt = 0L
@@ -121,7 +125,7 @@ class TrainingService : Service() {
                 }
             }
         }
-        return START_STICKY
+        return if (action == ACTION_START) START_REDELIVER_INTENT else START_STICKY
     }
 
     private fun beginTraining(modelId: String) {
@@ -307,8 +311,13 @@ class TrainingService : Service() {
             state = state.copy(message = "Allocating model…")
             publishState(state, persist = false, forceNotify = true)
 
+            var memoryMessage: String? = null
             model = openModel(manifest)
             var step = model!!.step.toInt().coerceAtLeast(0)
+            if (resumedWithRecovery && step > 0) {
+                memoryMessage = "Recovered the latest weights from step $step after the app " +
+                    "was closed. Optimizer state may restart; progress is preserved."
+            }
             if (step >= totalSteps) {
                 finish(
                     modelId,
@@ -323,7 +332,13 @@ class TrainingService : Service() {
             var batch = settings.batchSize
             val adjustment = MemoryGuard.adjustForDevice(cfg, batch, seq, this)
             batch = adjustment.batchSize
-            var memoryMessage = adjustment.message
+            if (adjustment.message != null) {
+                memoryMessage = if (memoryMessage == null) {
+                    adjustment.message
+                } else {
+                    "$memoryMessage ${adjustment.message}"
+                }
+            }
 
             acquireWakeLock()
             state = state.copy(
@@ -334,6 +349,7 @@ class TrainingService : Service() {
             )
             publishState(state, persist = true, forceNotify = true)
 
+            val recoveryEvery = RecoveryPolicy.intervalFor(cfg.paramCount())
             val sampleTokens = batch * seq
             val inputTokens = IntArray(sampleTokens)
             val targetTokens = IntArray(sampleTokens)
@@ -475,11 +491,24 @@ class TrainingService : Service() {
                     updatedAt = System.currentTimeMillis()
                 )
 
+                val recoveryDue = RecoveryPolicy.isDue(step, totalSteps, recoveryEvery) ||
+                    checkpointRequested
+                if (recoveryDue) {
+                    checkpointRequested = false
+                    withContext(Dispatchers.IO) {
+                        model!!.saveCheckpoint(store.recoveryCheckpoint(modelId).absolutePath, false)
+                    }
+                }
+
                 if (step % checkpointEvery == 0 || step == totalSteps || stopRequested) {
                     val last = store.lastCheckpoint(modelId)
-                    val ok = model!!.saveCheckpoint(last.absolutePath, true)
+                    val ok = withContext(Dispatchers.IO) {
+                        model!!.saveCheckpoint(last.absolutePath, true)
+                    }
                     if (ok && loss <= bestLoss + 1e-6f) {
-                        model!!.saveCheckpoint(store.bestCheckpoint(modelId).absolutePath, false)
+                        withContext(Dispatchers.IO) {
+                            model!!.saveCheckpoint(store.bestCheckpoint(modelId).absolutePath, false)
+                        }
                     }
                     store.saveLiveState(state)
                     lastPersistAt = System.currentTimeMillis()
@@ -492,14 +521,16 @@ class TrainingService : Service() {
 
                 if (now - lastNotify > 1_000) {
                     lastNotify = now
-                    publishState(state, persist = false, notify = true)
+                    publishState(state, persist = true, notify = true)
                 } else {
                     publishState(state, persist = false, notify = false)
                 }
             }
 
             if (model!!.isOpen) {
-                model!!.saveCheckpoint(store.lastCheckpoint(modelId).absolutePath, true)
+                withContext(Dispatchers.IO) {
+                    model!!.saveCheckpoint(store.lastCheckpoint(modelId).absolutePath, true)
+                }
             }
             val status = if (stopRequested) TrainingStatus.STOPPED else TrainingStatus.COMPLETED
             val message = if (stopRequested) {
@@ -593,9 +624,15 @@ class TrainingService : Service() {
 
     private fun openModel(manifest: ModelManifest): NativeModel {
         val last = store.lastCheckpoint(manifest.id)
+        val recovery = store.recoveryCheckpoint(manifest.id)
+        val lastStep = CheckpointHeader.readStep(last) ?: -1L
+        val recoveryStep = CheckpointHeader.readStep(recovery) ?: -1L
+        val useRecovery = CheckpointHeader.hasMagic(recovery) && recoveryStep > lastStep
+        resumedWithRecovery = useRecovery
+        val selected = if (useRecovery) recovery else last
         val cfg = manifest.config
-        val model = if (last.exists()) {
-            NativeModel.load(last.absolutePath, withOptimizer = true)
+        val model = if (selected.exists()) {
+            NativeModel.load(selected.absolutePath, withOptimizer = true)
                 ?: throw TrainingFailure(
                     "The checkpoint could not be loaded.",
                     "Delete checkpoints/last.mfck for this model and start training again."
@@ -751,10 +788,11 @@ class TrainingService : Service() {
 
     private fun startInForeground(state: TrainingLiveState) {
         val notification = buildNotification(state)
-        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-        } else {
-            0
+        val type = when {
+            Build.VERSION.SDK_INT >= 34 -> ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            else -> 0
         }
         ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type)
     }
@@ -873,10 +911,23 @@ class TrainingService : Service() {
         if (lock.isHeld) runCatching { lock.release() }
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        checkpointRequested = true
+        if (store.activeModelId() != null && currentModelId != null) {
+            TrainingRestartReceiver.schedule(this, 5_000L)
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
+        checkpointRequested = true
+        val active = store.activeModelId()
         stopRequested = true
         releaseWakeLock()
         scope.cancel()
+        if (active != null) {
+            TrainingRestartReceiver.schedule(this, 10_000L)
+        }
         super.onDestroy()
     }
 }
