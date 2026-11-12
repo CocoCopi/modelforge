@@ -61,7 +61,7 @@ class NvidiaClient(
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(90, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
-        .callTimeout(180, TimeUnit.SECONDS)
+        .callTimeout(300, TimeUnit.SECONDS)
         .build()
 ) {
     @Volatile
@@ -80,11 +80,12 @@ class NvidiaClient(
         if (apiKey.isBlank()) throw AiException("No NVIDIA API key saved.")
         val payload = buildJsonObject {
             put("model", MODEL)
-            put("max_tokens", 8192)
+            put("max_tokens", 4096)
             put("seed", 0)
             put("stream", true)
             put("temperature", 0.4)
             put("top_p", 0.95)
+            put("reasoning_effort", "none")
             put("messages", buildJsonArray {
                 messages.forEach { message ->
                     add(buildJsonObject {
@@ -149,6 +150,28 @@ class NvidiaClient(
             }
         } catch (t: AiException) {
             throw t
+        } catch (t: java.net.SocketTimeoutException) {
+            throw AiException(
+                "NVIDIA timed out. If the progress counter stayed at 0 events, this phone could not " +
+                    "reach integrate.api.nvidia.com; try switching Wi-Fi/mobile data or VPN. If events " +
+                    "were arriving, the model took too long.",
+                t
+            )
+        } catch (t: java.net.UnknownHostException) {
+            throw AiException(
+                "Could not resolve integrate.api.nvidia.com. Check the connection, DNS or VPN.",
+                t
+            )
+        } catch (t: java.net.ConnectException) {
+            throw AiException(
+                "Could not connect to integrate.api.nvidia.com. Check the connection or VPN.",
+                t
+            )
+        } catch (t: javax.net.ssl.SSLException) {
+            throw AiException(
+                "Secure connection to NVIDIA failed. Check the phone's date/time and VPN.",
+                t
+            )
         } catch (t: Throwable) {
             val message = t.message ?: t.javaClass.simpleName
             throw AiException(

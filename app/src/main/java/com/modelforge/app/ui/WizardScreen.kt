@@ -330,7 +330,8 @@ private fun AiPlanStep(vm: ModelForgeViewModel, state: WizardState) {
         LedgerStat("api key", if (keyPresent) "saved securely" else "not set")
         Text(
             "Uses ${com.modelforge.app.data.ai.NvidiaClient.MODEL} through NVIDIA's hosted API. " +
-                "The key is stored with EncryptedSharedPreferences, sent only to NVIDIA, and never logged.",
+                "Reasoning is set to none so the JSON plan starts promptly. The key is stored with " +
+                "EncryptedSharedPreferences, sent only to NVIDIA, and never logged.",
             style = MaterialTheme.typography.bodySmall,
             color = ForgeColors.inkMuted
         )
