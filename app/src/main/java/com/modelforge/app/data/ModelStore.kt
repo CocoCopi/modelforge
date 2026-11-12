@@ -41,6 +41,7 @@ class ModelStore(context: Context) {
     fun tokenCacheFile(id: String): File = File(dataDir(id), "tokens.bin")
     fun tokenCacheManifestFile(id: String): File = File(dataDir(id), "tokens_manifest.json")
     fun liveStateFile(id: String): File = File(modelDir(id), "training_state.json")
+    fun modelCardFile(id: String): File = File(modelDir(id), "MODEL_CARD.md")
 
     fun cacheFileFor(id: String, index: Int): File = File(dataDir(id), "dataset_$index.txt")
 

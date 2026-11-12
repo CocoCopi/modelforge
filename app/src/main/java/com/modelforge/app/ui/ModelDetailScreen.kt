@@ -18,6 +18,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.modelforge.app.data.TrainingLiveState
 import com.modelforge.app.data.TrainingStatus
@@ -33,6 +34,7 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
     var state by remember(modelId) { mutableStateOf(vm.liveState(modelId)) }
     var confirmDelete by remember { mutableStateOf(false) }
     val identity by vm.identityCheck.collectAsState()
+    val context = LocalContext.current
 
     LaunchedEffect(modelId) {
         while (true) {
@@ -220,6 +222,15 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
                 ForgeOutlineButton(
                     "Open playground and export",
                     onClick = { vm.openPlayground(modelId) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                ForgeOutlineButton(
+                    "Save and share model card",
+                    onClick = {
+                        vm.writeModelCard(modelId)?.let { card ->
+                            shareFile(context, card, "text/markdown")
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth()
                 )
                 ForgeOutlineButton(

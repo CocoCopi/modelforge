@@ -10,6 +10,7 @@ import com.modelforge.app.core.IdentityCheck
 import com.modelforge.app.core.ModelConfig
 import com.modelforge.app.core.ResponseModes
 import com.modelforge.app.data.DatasetMixEntry
+import com.modelforge.app.data.ModelCard
 import com.modelforge.app.data.ModelManifest
 import com.modelforge.app.data.ModelPreset
 import com.modelforge.app.data.ModelStore
@@ -848,6 +849,16 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         refreshModels()
         _identityCheck.value = IdentityCheckState()
         openTraining(id)
+    }
+
+    fun writeModelCard(id: String): File? {
+        val manifest = store.loadManifest(id) ?: return null
+        val card = ModelCard.build(manifest, store.loadLiveState(id))
+        val file = store.modelCardFile(id)
+        return runCatching {
+            file.writeText(card)
+            file
+        }.getOrNull()
     }
 
     fun packedFile(id: String, bits: Int): File = store.packedFile(id, bits)

@@ -19,6 +19,7 @@ import androidx.core.content.ContextCompat
 import com.modelforge.app.MainActivity
 import com.modelforge.app.R
 import com.modelforge.app.core.HardwareDetector
+import com.modelforge.app.data.ModelCard
 import com.modelforge.app.data.ModelManifest
 import com.modelforge.app.data.ModelStore
 import com.modelforge.app.data.TrainingLiveState
@@ -695,6 +696,12 @@ class TrainingService : Service() {
             updatedAt = System.currentTimeMillis()
         )
         publishState(finalState, persist = true, forceNotify = true)
+        runCatching {
+            val manifest = store.loadManifest(modelId)
+            if (manifest != null) {
+                store.modelCardFile(modelId).writeText(ModelCard.build(manifest, finalState))
+            }
+        }
         releaseWakeLock()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
         stopSelf()
