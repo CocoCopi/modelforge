@@ -141,3 +141,35 @@ Measured locally (host g++ build, same 64-wide 2-layer test model):
 - Greedy generation after a packed 8-bit load matched the QAT model exactly.
 - The fp32 weights-only checkpoint for the same model would be about 289 KB, so
   the 4-bit export is roughly 4.3x smaller.
+
+## Phase 6 - Compose wizard, training dashboard and model details
+
+Status: DONE - CI run 43156679474 green (host native tests, JVM tests and debug
+APK). The first attempt failed on a Kotlin delegated-state smart cast in the
+training screen; that was fixed without changing behaviour.
+
+- Real Compose app: `MainActivity` now hosts `ModelForgeRoot`, a manual screen
+  state machine (Home, Wizard, Training, ModelDetail) with system-back handling;
+  no placeholder Phase 1 screen remains.
+- Home lists saved models with live status/progress/loss, the detected hardware
+  limit, battery/thermal state and an encrypted Hugging Face token dialog.
+- Four-step new-model wizard: target-size chips with derived architecture and
+  counted parameters, 4/8/32-bit selection, Hugging Face dataset search,
+  config/split/column selection, row and mix-weight sliders, download progress,
+  dataset licence warnings, training-plan sliders and a review screen that
+  writes the manifest and starts the foreground service.
+- Training dashboard polls the live state once per second: progress, elapsed
+  time, ETA, loss/best loss/tokens per second/RAM, loss history chart, sample
+  output, device safety state and pause/resume/stop controls. Training continues
+  in the background via the existing notification actions.
+- Model detail shows architecture, training metrics, datasets, full-precision
+  and packed-size estimates, checkpoint sizes, a confirmation-guarded delete,
+  and links back into live training. Deleting an actively training model is
+  blocked.
+- UI numbers stay honest: sizes are exact layout estimates, quality text comes
+  from measured training state, and the app states that these tiny from-scratch
+  models produce simple text.
+
+Not yet covered here: device-level Compose UI tests. The wizard and dashboards
+were verified by compilation and the ARM64 debug APK build; an emulator/device
+pass is still useful before release.
