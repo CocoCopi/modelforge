@@ -9,7 +9,7 @@ quantization-aware training, writes checkpoints, and exports packed 2/3/4/8-bit
 models. The playground generates text from either the full-precision checkpoint
 or a packed export and can share the packed file.
 
-Status: v2.0.0 production build. The repository builds and tests on GitHub
+Status: v2.0.1 production build. The repository builds and tests on GitHub
 Actions and publishes a signed release APK/AAB. See
 [Honest limitations](#honest-limitations) before relying on model quality.
 
@@ -64,19 +64,28 @@ Actions and publishes a signed release APK/AAB. See
 - NCM and the AI-designed architecture are planning paths only; they have no
   native trainer yet.
 
-## Install (v2.0.0)
+## Install (v2.0.1)
 
 1. Open [Releases](https://github.com/CocoCopi/modelforge/releases) and download
-   the latest `ModelForge-2.0.0-arm64.apk` directly.
+   the latest `ModelForge-2.0.1-arm64.apk` directly.
 2. Install it on an arm64 Android 8.0+ phone, for example
-   `adb install ModelForge-2.0.0-arm64.apk`.
+   `adb install ModelForge-2.0.1-arm64.apk`.
 3. If an older development build is installed, uninstall it once. Older CI
    builds used an ephemeral debug certificate.
 4. Allow the notification permission when prompted so training controls are
    visible in the notification shade.
 
 The release APK is signed with the project's stable release key. The matching
-AAB is attached for store distribution.
+AAB is attached for store distribution. Updating from v2.0.0 keeps app data.
+
+### AI architect troubleshooting
+
+The NVIDIA model may reason silently before it emits the plan, so the first
+token can take 10-60 seconds. v2.0.1 shows elapsed time, stream-event count and a
+**Cancel request** button. A 401/403 means the key is invalid or lacks access to
+the configured model; a 404 means that model is not enabled for the account. If
+the request finishes without plan text, retry; the app now explains this instead
+of staying on "Designing..." indefinitely.
 
 ## Using the app
 
