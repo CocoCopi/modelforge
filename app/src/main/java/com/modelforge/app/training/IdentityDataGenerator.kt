@@ -55,8 +55,9 @@ object IdentityDataGenerator {
             val followUp = if (index % 5 == 0) {
                 templates[(index + 3) % templates.size]
             } else null
+            val opener = opener(language, index)
             val text = buildString {
-                append("User: ").append(template.question).append('\n')
+                append("User: ").append(opener).append(template.question).append('\n')
                 append("Assistant: ").append(template.answer).append('\n')
                 if (followUp != null) {
                     append("User: ").append(followUp.question).append('\n')
@@ -86,6 +87,22 @@ object IdentityDataGenerator {
         if (corpusChars <= 0) return 0
         return (corpusChars * fraction.coerceIn(0.03, 0.05)).toInt()
             .coerceIn(0, corpusChars / 3)
+    }
+
+    private fun opener(language: String, index: Int): String {
+        val options = when (language) {
+            "Spanish" -> listOf("", "¡Hola! ", "Una pregunta rápida: ", "Oye, ", "Disculpa, ")
+            "French" -> listOf("", "Salut ! ", "Une question rapide : ", "Hé, ", "Excuse-moi, ")
+            "German" -> listOf("", "Hallo! ", "Kurze Frage: ", "Hey, ", "Entschuldige, ")
+            "Portuguese" -> listOf("", "Olá! ", "Uma pergunta rápida: ", "Ei, ", "Com licença, ")
+            "Italian" -> listOf("", "Ciao! ", "Una domanda veloce: ", "Ehi, ", "Scusa, ")
+            "Hindi" -> listOf("", "नमस्ते! ", "एक छोटा सवाल: ", "अरे, ", "सुनिए, ")
+            "Japanese" -> listOf("", "こんにちは！", "ちょっと質問です。", "ねえ、", "すみません、")
+            "Chinese" -> listOf("", "你好！", "快速问一下：", "嘿，", "打扰一下，")
+            "Arabic" -> listOf("", "مرحبًا! ", "سؤال سريع: ", "يا، ", "عذرًا، ")
+            else -> listOf("", "Hi! ", "Quick question: ", "Hey, ", "Excuse me, ")
+        }
+        return options[index % options.size]
     }
 
     private fun thanks(language: String, name: String): String = when (language) {
