@@ -34,3 +34,29 @@ installable (setup-android now only installs `platform-tools`), and
 kotlinx.serialization 1.7.1 was downgraded to 1.6.3 because it requires Kotlin 2.0.
 
 Nothing in this phase claims to train or generate text yet.
+
+## Phase 2 - C++ engine + JNI bridge
+
+Status: implemented, awaiting CI green.
+
+- From-scratch GPT: token/position embeddings, causal multi-head attention,
+  MLP with tanh-GELU, LayerNorm, tied output head, manual backward pass,
+  AdamW with bias correction, weight decay on matrices/embeddings only.
+- ARM NEON dot products on arm64, persistent worker pool with work-size
+  thresholds (small matrices stay single-threaded to avoid thread overhead).
+- QAT hook: symmetric per-group fake quantization with a straight-through
+  estimator on linear layers. Embeddings, norms, biases and the tied head stay
+  high precision. Packed file export/inference lands in Phase 5.
+- Checkpoints: atomic write, fp32 weights plus optional AdamW m/v and step;
+  architecture is validated on load. Weights-only load reproduces greedy output.
+- JNI bridge with create/free/train/generate/checkpoint/QAT/config calls.
+- Native tests added to CTest: gradient check and single-batch overfit.
+
+Measured locally (aarch64 host build, g++ -O2):
+
+- gradient check: 37 parameter entries, worst relative error 0.0183 (tolerance 0.05).
+- overfit: batch of 2x16 tokens, loss 3.445281 -> 0.000637 in 600 AdamW steps
+  (lr 0.003, no weight decay). Greedy generation after checkpoint reload is
+  identical to the in-memory model.
+- The overfit test took about 30 s on this proot after adding a persistent
+  thread pool and small-work serial thresholds.

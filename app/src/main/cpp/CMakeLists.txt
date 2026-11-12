@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(MF_CORE_SOURCES
+    core/gpt.cpp
 )
 
 if(ANDROID)
@@ -33,4 +34,6 @@ else()
     endfunction()
 
     mf_add_host_test(test_config tests/test_config.cpp)
+    mf_add_host_test(test_grad tests/test_grad.cpp)
+    mf_add_host_test(test_overfit tests/test_overfit.cpp)
 endif()
