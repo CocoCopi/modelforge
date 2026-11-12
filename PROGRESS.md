@@ -284,3 +284,22 @@ Status: DONE - CI run 43173763360 green (host native tests, JVM tests,
 Still not wired: the 20-question post-training identity check and one-tap
 reinforce, preset save/load, runtime speed/reasoning switches, and the C++
 architecture plugins behind the new registry entries.
+
+## v2 Phase 3 - response speed and reasoning modes
+
+Status: DONE - CI run 43177818802 green (host native tests, JVM tests,
+`verifyPaparazziDebug`, debug APK and artifacts).
+
+- Added `core/ResponseModes.kt`: Instant, Normal and Extra time budgets (32,
+  requested and at least 512 tokens), a reasoning prompt only when thinking is
+  allowed, and think-tag splitting for collapsible output. Instant explicitly
+  skips thinking.
+- The playground now reads speed and reasoning defaults from the manifest,
+  exposes both as inference-time switches, shows the effective token budget, and
+  warns below ~50M parameters that reasoning is shallow.
+- Generation measures and reports latency and tokens/second; the output no
+  longer includes the prompt text, so the displayed answer is the generated
+  passage. Reasoning is shown in a collapsed block when a `thinking` section is
+  present.
+- `ResponseModesTest` covers mode normalization, budgets, Instant skipping
+  thinking, prompt construction, tag splitting and plain text passthrough.
