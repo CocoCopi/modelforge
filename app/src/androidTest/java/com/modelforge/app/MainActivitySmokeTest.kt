@@ -2,10 +2,13 @@ package com.modelforge.app
 
 import android.Manifest
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasScrollAction
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNode
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
 import org.junit.Rule
@@ -30,7 +33,10 @@ class MainActivitySmokeTest {
 
     @Test
     fun diagnosticsScreenOpens() {
-        composeRule.onNodeWithText("DIAGNOSTICS").performScrollTo().performClick()
+        composeRule
+            .onNode(hasScrollAction())
+            .performScrollToNode(hasText("DIAGNOSTICS"))
+        composeRule.onNodeWithText("DIAGNOSTICS").performClick()
         composeRule
             .onNodeWithText("Local evidence for what this build can do. Secrets are redacted.")
             .assertIsDisplayed()
