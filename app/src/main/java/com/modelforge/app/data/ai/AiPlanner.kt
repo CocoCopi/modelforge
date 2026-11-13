@@ -189,13 +189,15 @@ object AiPlanner {
         val datasets = plan.datasets.mapNotNull { item ->
             val id = item.datasetId.trim()
             val columns = item.columns.map { it.trim() }.filter { it.isNotBlank() }
-            val key = "$id|${item.config.trim()}|${item.split.trim()}"
+            val config = item.config.trim().ifBlank { "default" }
+            val split = item.split.trim().ifBlank { "train" }
+            val key = "$id|$config|$split"
             if (id.isBlank() || !seen.add(key)) return@mapNotNull null
             item.copy(
                 datasetId = id,
                 purpose = item.purpose.trim().ifBlank { "general" },
-                config = item.config.trim(),
-                split = item.split.trim().ifBlank { "train" },
+                config = config,
+                split = split,
                 columns = columns,
                 rows = item.rows.coerceIn(100, 5000),
                 weight = item.weight.coerceIn(0.1f, 5f),

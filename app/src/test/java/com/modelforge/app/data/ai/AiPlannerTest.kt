@@ -75,6 +75,20 @@ class AiPlannerTest {
     }
 
     @Test
+    fun keeps_the_same_dataset_id_when_configs_differ() {
+        val plan = AiPlanner.sanitize(
+            AiPlan(
+                overview = "x",
+                datasets = listOf(
+                    AiDatasetSuggestion(datasetId = "owner/data", config = "sample-10BT"),
+                    AiDatasetSuggestion(datasetId = "owner/data", config = "sample-100BT")
+                )
+            )
+        )
+        assertEquals(2, plan.datasets.size)
+    }
+
+    @Test
     fun flags_non_commercial_or_unknown_datasets() {
         val plan = AiPlanner.sanitize(
             AiPlan(
