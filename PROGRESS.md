@@ -654,3 +654,34 @@ Status: DONE - CI run 43381804014 green.
 Limitations: Hugging Face still controls the rate limit. A Hugging Face token
 on Home is the most reliable way to raise it; without a token, waiting or
 switching networks may be required even with backoff and pacing.
+
+## Production release v2.0.8 - NVIDIA transient-error retry
+
+Status: DONE - CI run 43401231533 green after fixing a compile error from run
+43400728327.
+
+- Reported issue: `NVIDIA HTTP 503: {"error":{"message":"content safety
+  screening is temporarily unavailable"}}`. This is a temporary hosted-service
+  failure, not a bad API key or prompt.
+- Added `NvidiaRetryPolicy`: `429` and `5xx` responses retry up to four
+  attempts. Server errors wait 5s, 15s and 30s; rate limits wait 20s, 45s and
+  60s. A valid `Retry-After` header takes priority and is capped at 120s.
+- `NvidiaClient` retries before any plan text is emitted, so a retry cannot
+  duplicate streamed content. The AI stage shows
+  "NVIDIA is temporarily unavailable; retrying in Xs".
+- Non-retryable errors remain immediate: `401/403`, `404`, malformed responses
+  and cancellation.
+- The final `503` message states that NVIDIA is temporarily unavailable and
+  asks the user to wait a minute and retry.
+- Added `NvidiaRetryPolicyTest` for retryable status codes, `Retry-After`
+  handling and backoff values.
+- Version `2.0.8` (`versionCode 10`), signed with the stable key so it updates
+  over 2.0.0-2.0.7. Release:
+  https://github.com/CocoCopi/modelforge/releases/tag/v2.0.8
+- APK SHA-256:
+  `4f74e072268fe814664aff2e7a2761ba23fd5f8b9d8e3ffa088a0bd98c7736d7`
+- AAB SHA-256:
+  `a9ac1b810cfe0924dee431270af8d0312e654c42c7d9d88d3ac9f0ccdd988e37`
+
+Limitations: a persistent 503 still depends on NVIDIA restoring the content
+safety screening service. Retrying cannot bypass a server-side outage.
