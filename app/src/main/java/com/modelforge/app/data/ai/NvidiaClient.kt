@@ -249,6 +249,8 @@ class NvidiaClient(
             onRetry("NVIDIA is temporarily unavailable; retrying in ${seconds}s")
             delay(seconds * 1_000L)
         }
+        @Suppress("UNREACHABLE_CODE")
+        throw AiException("NVIDIA request ended unexpectedly. Retry.")
     }
 
     companion object {
