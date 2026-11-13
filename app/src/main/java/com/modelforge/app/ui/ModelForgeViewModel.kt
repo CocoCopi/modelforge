@@ -186,7 +186,9 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     private val hf = HfRepository(HfClient.create { tokenStore.token }) { message ->
         _aiPlanner.update { if (it.busy) it.copy(stage = message) else it }
     }
-    private val nvidia = NvidiaClient()
+    private val nvidia = NvidiaClient { message ->
+        _aiPlanner.update { if (it.busy) it.copy(stage = message) else it }
+    }
     private val agent = AiDatasetAgent(nvidia, hf)
     private var aiJob: kotlinx.coroutines.Job? = null
     private var lastAiRequest: AiPlanRequest? = null

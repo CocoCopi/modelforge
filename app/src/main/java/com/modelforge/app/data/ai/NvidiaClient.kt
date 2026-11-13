@@ -1,6 +1,7 @@
 package com.modelforge.app.data.ai
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -65,13 +66,36 @@ object NvidiaStreamParser {
     }
 }
 
+internal object NvidiaRetryPolicy {
+    const val MAX_ATTEMPTS = 4
+
+    fun isRetryable(code: Int): Boolean = code == 429 || code in 500..599
+
+    fun waitSeconds(code: Int, retryAfter: Long?, attempt: Int): Long {
+        val fallback = if (code == 429) {
+            longArrayOf(20L, 45L, 60L)
+        } else {
+            longArrayOf(5L, 15L, 30L)
+        }
+        return retryAfter?.coerceIn(1L, 120L)
+            ?: fallback[attempt.coerceIn(0, fallback.lastIndex)]
+    }
+}
+
+private class NvidiaRetryableException(
+    val code: Int,
+    val retryAfter: Long?,
+    message: String
+) : Exception(message)
+
 class NvidiaClient(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(90, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .callTimeout(300, TimeUnit.SECONDS)
-        .build()
+        .build(),
+    private val onRetry: (String) -> Unit = {}
 ) : AiChat {
     @Volatile
     private var activeCall: Call? = null
@@ -110,88 +134,120 @@ class NvidiaClient(
             .header("Accept", "text/event-stream")
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
-        val call = client.newCall(request)
-        activeCall = call
-        try {
-            call.execute().use { response ->
-                if (!response.isSuccessful) {
-                    val detail = response.body?.string().orEmpty().take(500).trim()
-                    val hint = when (response.code) {
-                        401, 403 -> "Check that the NVIDIA API key is valid and has access to $MODEL."
-                        404 -> "The model $MODEL may not be available to this account."
-                        429 -> "NVIDIA rate limit reached. Wait a minute and retry."
-                        else -> "The hosted request failed."
+        var attempt = 0
+        while (true) {
+            val call = client.newCall(request)
+            activeCall = call
+            val failure = try {
+                call.execute().use { response ->
+                    if (!response.isSuccessful) {
+                        val code = response.code
+                        val detail = response.body?.string().orEmpty().take(500).trim()
+                        val hint = when (code) {
+                            401, 403 -> "Check that the NVIDIA API key is valid and has access to $MODEL."
+                            404 -> "The model $MODEL may not be available to this account."
+                            429 -> "NVIDIA rate limit reached. Wait a minute and retry."
+                            in 500..599 -> "NVIDIA is temporarily unavailable. The app retried " +
+                                "automatically; wait a minute and try again."
+                            else -> "The hosted request failed."
+                        }
+                        val message = "NVIDIA HTTP $code: $detail $hint"
+                        if (NvidiaRetryPolicy.isRetryable(code)) {
+                            throw NvidiaRetryableException(
+                                code,
+                                response.header("Retry-After")?.toLongOrNull(),
+                                message
+                            )
+                        }
+                        throw AiException(message)
                     }
-                    throw AiException("NVIDIA HTTP ${response.code}: $detail $hint")
-                }
-                val body = response.body ?: throw AiException("NVIDIA returned an empty response.")
-                val contentType = response.header("Content-Type").orEmpty()
-                if (!contentType.contains("text/event-stream", ignoreCase = true)) {
-                    val raw = body.string()
-                    val content = NvidiaStreamParser.fullContent(raw)
-                        ?: throw AiException("NVIDIA returned an unexpected response: ${raw.take(300)}")
-                    onActivity()
-                    onDelta(content)
-                    return@withContext content
-                }
-                val source = body.source()
-                val out = StringBuilder()
-                while (true) {
-                    val line = source.readUtf8Line() ?: break
-                    if (!line.startsWith("data:")) continue
-                    val data = line.removePrefix("data:").trim()
-                    if (data.isBlank()) continue
-                    if (data == "[DONE]") break
-                    onActivity()
-                    val delta = NvidiaStreamParser.delta(data)
-                    if (delta != null) {
-                        out.append(delta)
-                        onDelta(delta)
+                    val body = response.body ?: throw AiException("NVIDIA returned an empty response.")
+                    val contentType = response.header("Content-Type").orEmpty()
+                    if (!contentType.contains("text/event-stream", ignoreCase = true)) {
+                        val raw = body.string()
+                        val content = NvidiaStreamParser.fullContent(raw)
+                            ?: throw AiException("NVIDIA returned an unexpected response: ${raw.take(300)}")
+                        onActivity()
+                        onDelta(content)
+                        return@withContext content
                     }
+                    val source = body.source()
+                    val out = StringBuilder()
+                    while (true) {
+                        val line = source.readUtf8Line() ?: break
+                        if (!line.startsWith("data:")) continue
+                        val data = line.removePrefix("data:").trim()
+                        if (data.isBlank()) continue
+                        if (data == "[DONE]") break
+                        onActivity()
+                        val delta = NvidiaStreamParser.delta(data)
+                        if (delta != null) {
+                            out.append(delta)
+                            onDelta(delta)
+                        }
+                    }
+                    if (out.isBlank()) {
+                        throw AiException(
+                            "NVIDIA finished without returning plan text. The model may have spent its budget " +
+                                "on hidden reasoning. Retry, or try again with a shorter model plan."
+                        )
+                    }
+                    return@withContext out.toString()
                 }
-                if (out.isBlank()) {
-                    throw AiException(
-                        "NVIDIA finished without returning plan text. The model may have spent its budget " +
-                            "on hidden reasoning. Retry, or try again with a shorter model plan."
-                    )
-                }
-                out.toString()
+                null
+            } catch (t: NvidiaRetryableException) {
+                t
+            } catch (t: AiException) {
+                throw t
+            } catch (t: java.net.SocketTimeoutException) {
+                throw AiException(
+                    "NVIDIA timed out. If the progress counter stayed at 0 events, this phone could not " +
+                        "reach integrate.api.nvidia.com; try switching Wi-Fi/mobile data or VPN. If events " +
+                        "were arriving, the model took too long.",
+                    t
+                )
+            } catch (t: java.net.UnknownHostException) {
+                throw AiException(
+                    "Could not resolve integrate.api.nvidia.com. Check the connection, DNS or VPN.",
+                    t
+                )
+            } catch (t: java.net.ConnectException) {
+                throw AiException(
+                    "Could not connect to integrate.api.nvidia.com. Check the connection or VPN.",
+                    t
+                )
+            } catch (t: javax.net.ssl.SSLException) {
+                throw AiException(
+                    "Secure connection to NVIDIA failed. Check the phone's date/time and VPN.",
+                    t
+                )
+            } catch (t: Throwable) {
+                val message = t.message ?: t.javaClass.simpleName
+                throw AiException(
+                    if (message.contains("Canceled", ignoreCase = true) ||
+                        message.contains("Socket closed", ignoreCase = true)
+                    ) "AI request was cancelled."
+                    else "Could not reach NVIDIA: $message",
+                    t
+                )
+            } finally {
+                if (activeCall === call) activeCall = null
             }
-        } catch (t: AiException) {
-            throw t
-        } catch (t: java.net.SocketTimeoutException) {
-            throw AiException(
-                "NVIDIA timed out. If the progress counter stayed at 0 events, this phone could not " +
-                    "reach integrate.api.nvidia.com; try switching Wi-Fi/mobile data or VPN. If events " +
-                    "were arriving, the model took too long.",
-                t
+
+            if (failure == null) {
+                throw AiException("NVIDIA request ended unexpectedly. Retry.")
+            }
+            attempt++
+            if (attempt >= NvidiaRetryPolicy.MAX_ATTEMPTS) {
+                throw AiException(failure.message ?: "NVIDIA is temporarily unavailable.")
+            }
+            val seconds = NvidiaRetryPolicy.waitSeconds(
+                failure.code,
+                failure.retryAfter,
+                attempt - 1
             )
-        } catch (t: java.net.UnknownHostException) {
-            throw AiException(
-                "Could not resolve integrate.api.nvidia.com. Check the connection, DNS or VPN.",
-                t
-            )
-        } catch (t: java.net.ConnectException) {
-            throw AiException(
-                "Could not connect to integrate.api.nvidia.com. Check the connection or VPN.",
-                t
-            )
-        } catch (t: javax.net.ssl.SSLException) {
-            throw AiException(
-                "Secure connection to NVIDIA failed. Check the phone's date/time and VPN.",
-                t
-            )
-        } catch (t: Throwable) {
-            val message = t.message ?: t.javaClass.simpleName
-            throw AiException(
-                if (message.contains("Canceled", ignoreCase = true) ||
-                    message.contains("Socket closed", ignoreCase = true)
-                ) "AI request was cancelled."
-                else "Could not reach NVIDIA: $message",
-                t
-            )
-        } finally {
-            activeCall = null
+            onRetry("NVIDIA is temporarily unavailable; retrying in ${seconds}s")
+            delay(seconds * 1_000L)
         }
     }
 
