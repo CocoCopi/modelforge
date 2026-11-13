@@ -594,3 +594,31 @@ Status: DONE - CI runs 43371588988 and 43372121583 green.
   `e0cc9de00dbb38b7046a8600ef91fd2268e8dc5444f1b1cc7a1f9efdd47fe0e3`
 - AAB SHA-256:
   `07505971ccf52ea03ce1b58618f01262e36262cbc751969b5409b12ab37e39e6`
+
+## Production release v2.0.6 - tolerant AI action parsing
+
+Status: DONE - CI run 43374392558 green.
+
+- Reported issue: "The AI could not produce a verified dataset plan. The AI
+  sent an unreadable tool action." The agent gave up after repeated unreadable
+  responses.
+- Reworked `AiPlanner.parseAgentAction` to scan the whole response and try the
+  first valid JSON value. Handles prose around JSON, multiple objects, fenced
+  blocks, arrays, `action` objects, OpenAI-style `tool_calls`, and a final plan
+  stored as a JSON string.
+- Added action aliases for search/inspect/final names and fields
+  (`query`/`q`/`term`, `dataset_id`/`id`/`repo_id`, `limit`/`count`, and so on).
+- Added a direct-plan retry after the tool loop. Readable direct plans are
+  accepted and verified instead of being rejected for missing tool syntax.
+- Unreadable responses now include a 220-character sanitized snippet in the
+  error. Tool calls rethrow cancellation instead of swallowing it.
+- Added parser tests for prose/multiple objects, OpenAI tool calls, action
+  objects, direct plans and string-encoded plans, plus a direct-plan fallback
+  agent test.
+- Version `2.0.6` (`versionCode 8`), signed with the stable key so it updates
+  over 2.0.0-2.0.5. Release:
+  https://github.com/CocoCopi/modelforge/releases/tag/v2.0.6
+- APK SHA-256:
+  `d4fab67250bc259d75fbbb5e862961606074139ee0283b968a18e7a54c5530db`
+- AAB SHA-256:
+  `6a7354be90baed8ca3f8b1a48ae0e734c5f344339abfd5a15de603d6481476ad`
