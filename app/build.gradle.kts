@@ -18,8 +18,8 @@ android {
         applicationId = "com.modelforge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 8
-        versionName = "2.0.6"
+        versionCode = 9
+        versionName = "2.0.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

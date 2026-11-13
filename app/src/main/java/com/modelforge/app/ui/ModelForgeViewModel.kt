@@ -181,10 +181,16 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     private val draftStore = WizardDraftStore(app)
     private val presetStore = PresetStore(app)
     private val tokenStore = SecureTokenStore(app)
-    private val hf = HfRepository(HfClient.create { tokenStore.token })
+    private val _aiPlanner = MutableStateFlow(AiPlannerState())
+    val aiPlanner: StateFlow<AiPlannerState> = _aiPlanner.asStateFlow()
+    private val hf = HfRepository(HfClient.create { tokenStore.token }) { message ->
+        _aiPlanner.update { if (it.busy) it.copy(stage = message) else it }
+    }
     private val nvidia = NvidiaClient()
     private val agent = AiDatasetAgent(nvidia, hf)
     private var aiJob: kotlinx.coroutines.Job? = null
+    private var lastAiRequest: AiPlanRequest? = null
+    private var aiRateLimited = false
 
     val hardware = HardwareDetector.detect(app)
     val maxTargetParams: Long = hardware.maxTrainableParams
@@ -206,9 +212,6 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _aiKeyPresent = MutableStateFlow(tokenStore.nvidiaToken != null)
     val aiKeyPresent: StateFlow<Boolean> = _aiKeyPresent.asStateFlow()
-
-    private val _aiPlanner = MutableStateFlow(AiPlannerState())
-    val aiPlanner: StateFlow<AiPlannerState> = _aiPlanner.asStateFlow()
 
     private val _notice = MutableStateFlow<String?>(null)
     val notice: StateFlow<String?> = _notice.asStateFlow()
@@ -472,6 +475,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             bits = state.bits,
             currentDatasets = state.datasets.map { it.datasetId }
         )
+        lastAiRequest = req
         _aiPlanner.value = AiPlannerState(
             busy = true,
             streaming = "",
@@ -504,50 +508,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 )
                 applyAiTraining(plan.training)
                 autoApplyDatasets(plan, req)
-                val applied = _aiPlanner.value.appliedDatasetIds
-                val skipped = _aiPlanner.value.skippedDatasetIds
-                val datasetCount = _wizard.value.datasets.size
-                if (datasetCount > 0) {
-                    updateWizard {
-                        if (it.step == WizardStep.AI_PLAN.ordinal) {
-                            it.copy(step = WizardStep.REVIEW.ordinal, error = null)
-                        } else it.copy(error = null)
-                    }
-                    val fallbackApplied = applied - plan.datasets.map { it.datasetId }.toSet()
-                    _aiPlanner.update {
-                        it.copy(
-                            busy = false,
-                            applied = true,
-                            stage = when {
-                                applied.isEmpty() -> "Applied training settings; kept the existing dataset mix."
-                                fallbackApplied.isNotEmpty() -> "AI suggestions were unavailable; downloaded " +
-                                    "${fallbackApplied.size} verified starter dataset(s)." +
-                                    if (skipped.isEmpty()) "" else " Skipped ${skipped.size} suggestion(s)."
-                                else -> "Applied training settings and downloaded ${applied.size} dataset(s)." +
-                                    if (skipped.isEmpty()) "" else " Skipped ${skipped.size} unavailable suggestion(s)."
-                            }
-                        )
-                    }
-                } else {
-                    val reasons = _aiPlanner.value.skippedDatasetReasons.values
-                        .distinct()
-                        .take(2)
-                        .joinToString(" ")
-                    _aiPlanner.update {
-                        it.copy(
-                            busy = false,
-                            applied = false,
-                            stage = "Training settings applied.",
-                            error = if (plan.datasets.isEmpty()) {
-                                "The AI returned no usable dataset suggestions, and the verified " +
-                                    "fallbacks could not be downloaded. Check your connection and retry. $reasons"
-                            } else {
-                                "None of the AI's ${plan.datasets.size} dataset suggestion(s) could be " +
-                                    "downloaded, and the verified fallbacks failed too. $reasons"
-                            }.trim()
-                        )
-                    }
-                }
+                finishAiPlan(plan)
             } catch (t: kotlinx.coroutines.CancellationException) {
                 throw t
             } catch (t: Throwable) {
@@ -557,6 +518,92 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                         busy = false,
                         stage = "",
                         error = t.message ?: "AI planning failed. Check the key and connection."
+                    )
+                }
+            } finally {
+                aiJob = null
+            }
+        }
+    }
+
+    private fun finishAiPlan(plan: AiPlan) {
+        val applied = _aiPlanner.value.appliedDatasetIds
+        val skipped = _aiPlanner.value.skippedDatasetIds
+        val datasetCount = _wizard.value.datasets.size
+        if (datasetCount > 0) {
+            updateWizard {
+                if (it.step == WizardStep.AI_PLAN.ordinal) {
+                    it.copy(step = WizardStep.REVIEW.ordinal, error = null)
+                } else it.copy(error = null)
+            }
+            val fallbackApplied = applied - plan.datasets.map { it.datasetId }.toSet()
+            _aiPlanner.update {
+                it.copy(
+                    busy = false,
+                    applied = true,
+                    stage = when {
+                        applied.isEmpty() -> "Applied training settings; kept the existing dataset mix."
+                        fallbackApplied.isNotEmpty() -> "AI suggestions were unavailable; downloaded " +
+                            "${fallbackApplied.size} verified starter dataset(s)." +
+                            if (skipped.isEmpty()) "" else " Skipped ${skipped.size} suggestion(s)."
+                        else -> "Applied training settings and downloaded ${applied.size} dataset(s)." +
+                            if (skipped.isEmpty()) "" else " Skipped ${skipped.size} unavailable suggestion(s)."
+                    }
+                )
+            }
+        } else {
+            val reasons = _aiPlanner.value.skippedDatasetReasons.values
+                .distinct()
+                .take(2)
+                .joinToString(" ")
+            _aiPlanner.update {
+                it.copy(
+                    busy = false,
+                    applied = false,
+                    stage = "Training settings applied.",
+                    error = when {
+                        aiRateLimited -> "Hugging Face is rate-limiting this network, so dataset " +
+                            "downloads stopped. Wait a minute, add a Hugging Face token on Home for " +
+                            "higher limits, or switch network, then tap Retry dataset downloads. $reasons"
+                        plan.datasets.isEmpty() -> "The AI returned no usable dataset suggestions, and " +
+                            "the verified fallbacks could not be downloaded. Check your connection " +
+                            "and retry. $reasons"
+                        else -> "None of the AI's ${plan.datasets.size} dataset suggestion(s) could " +
+                            "be downloaded, and the verified fallbacks failed too. $reasons"
+                    }.trim()
+                )
+            }
+        }
+    }
+
+    fun retryAiDatasets() {
+        val plan = _aiPlanner.value.plan ?: return
+        val req = lastAiRequest ?: return
+        if (_aiPlanner.value.busy) return
+        _aiPlanner.value = _aiPlanner.value.copy(
+            busy = true,
+            streaming = "",
+            applied = false,
+            stage = "Retrying dataset downloads",
+            appliedDatasetIds = emptySet(),
+            skippedDatasetIds = emptySet(),
+            skippedDatasetReasons = emptyMap(),
+            startedAt = System.currentTimeMillis(),
+            error = null
+        )
+        aiJob = viewModelScope.launch {
+            try {
+                autoApplyDatasets(plan, req)
+                finishAiPlan(plan)
+            } catch (t: kotlinx.coroutines.CancellationException) {
+                throw t
+            } catch (t: Throwable) {
+                if (!isActive) return@launch
+                _aiPlanner.update {
+                    it.copy(
+                        busy = false,
+                        stage = "",
+                        error = t.message ?: "Dataset download failed. Check the connection and retry."
                     )
                 }
             } finally {
@@ -606,9 +653,11 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         val modelId = _wizard.value.modelId ?: return
         val dataDir = store.dataDir(modelId)
         val before = _wizard.value.datasets.size
-        val suggestions = plan.datasets.take(8)
+        aiRateLimited = false
+        val suggestions = plan.datasets.take(6)
         for ((position, suggestion) in suggestions.withIndex()) {
             tryApplyDataset(suggestion, "${position + 1}/${suggestions.size}", dataDir)
+            if (aiRateLimited) return
         }
         if (_wizard.value.datasets.size > before || _wizard.value.datasets.isNotEmpty()) return
 
@@ -625,6 +674,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 fallbacksApplied++
                 if (fallbacksApplied >= 2) return
             }
+            if (aiRateLimited) return
         }
     }
 
@@ -653,7 +703,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             val structure = hf.structure(id)
             val resolved = AiDatasetResolver.resolve(structure, suggestion)
                 ?: throw HfException("No usable text config, split or column was found.")
-            val rows = suggestion.rows.coerceIn(100, 1500)
+            val rows = suggestion.rows.coerceIn(100, 1000)
             val maxBytes = (rows.toLong() * 2048L).coerceIn(256_000L, 1_500_000L)
             _aiPlanner.update { it.copy(stage = "Downloading $id ($label)") }
             val stats = hf.downloadText(
@@ -699,6 +749,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         } catch (t: Throwable) {
             destination.delete()
             val reason = (t.message ?: "unavailable").take(180)
+            if (reason.contains("rate limit", ignoreCase = true)) aiRateLimited = true
             _aiPlanner.update {
                 it.copy(
                     skippedDatasetIds = it.skippedDatasetIds + id,

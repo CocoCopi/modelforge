@@ -11,6 +11,7 @@ import kotlinx.serialization.json.contentOrNull
 import retrofit2.HttpException
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 
 interface AiDatasetSource {
     suspend fun search(query: String, limit: Int = 30): List<HfDatasetSummary>
@@ -18,20 +19,28 @@ interface AiDatasetSource {
     suspend fun structure(datasetId: String): DatasetStructure
 }
 
-class HfRepository(private val bundle: HfApiBundle = HfClient.create()) : AiDatasetSource {
+class HfRepository(
+    private val bundle: HfApiBundle = HfClient.create(),
+    private val onThrottle: (String) -> Unit = {}
+) : AiDatasetSource {
+    private data class CacheEntry<T>(val value: T, val expiresAt: Long)
+
+    private val detailCache = ConcurrentHashMap<String, CacheEntry<HfDatasetSummary>>()
+    private val structureCache = ConcurrentHashMap<String, CacheEntry<DatasetStructure>>()
 
     override suspend fun search(query: String, limit: Int): List<HfDatasetSummary> {
         return try {
-            bundle.publicApi.searchDatasets(query, limit)
+            retryTransient { bundle.publicApi.searchDatasets(query, limit) }
         } catch (t: Throwable) {
             throw HfException(describeNetworkError(t), t)
         }
     }
 
     override suspend fun detail(id: String): HfDatasetSummary {
+        cached(detailCache, id)?.let { return it }
         return try {
-            val d = bundle.publicApi.datasetDetail(id)
-            HfDatasetSummary(
+            val d = retryTransient { bundle.publicApi.datasetDetail(id) }
+            val summary = HfDatasetSummary(
                 id = d.id,
                 downloads = d.downloads,
                 likes = d.likes,
@@ -39,14 +48,17 @@ class HfRepository(private val bundle: HfApiBundle = HfClient.create()) : AiData
                 tags = d.tags,
                 cardData = d.cardData
             )
+            detailCache[id] = CacheEntry(summary, System.currentTimeMillis() + CACHE_TTL_MS)
+            summary
         } catch (t: Throwable) {
             throw HfException(describeNetworkError(t), t)
         }
     }
 
     override suspend fun structure(datasetId: String): DatasetStructure {
+        cached(structureCache, datasetId)?.let { return it }
         try {
-            val info = bundle.serverApi.info(datasetId)
+            val info = retryTransient { bundle.serverApi.info(datasetId) }
             if (info.dataset_info.isNotEmpty()) {
                 val configs = info.dataset_info.map { (name, entry) ->
                     DatasetConfigInfo(
@@ -56,14 +68,17 @@ class HfRepository(private val bundle: HfApiBundle = HfClient.create()) : AiData
                     )
                 }
                 if (configs.any { it.textColumns.isNotEmpty() }) {
-                    return DatasetStructure(datasetId, configs)
+                    val structure = DatasetStructure(datasetId, configs)
+                    structureCache[datasetId] = CacheEntry(structure, System.currentTimeMillis() + CACHE_TTL_MS)
+                    return structure
                 }
             }
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            if (isRateLimited(t)) throw HfException(describeNetworkError(t), t)
             // Fall through to the splits endpoint; some datasets have no info yet.
         }
         return try {
-            val splits = bundle.serverApi.splits(datasetId)
+            val splits = retryTransient { bundle.serverApi.splits(datasetId) }
             if (splits.splits.isEmpty()) {
                 throw HfException("No configs or splits are available for $datasetId.")
             }
@@ -76,12 +91,26 @@ class HfRepository(private val bundle: HfApiBundle = HfClient.create()) : AiData
                     textColumnsFromRows(datasetId, config, splitNames)
                 )
             }
-            DatasetStructure(datasetId, configs)
+            val structure = DatasetStructure(datasetId, configs)
+            structureCache[datasetId] = CacheEntry(structure, System.currentTimeMillis() + CACHE_TTL_MS)
+            structure
         } catch (t: Throwable) {
             if (t is HfException) throw t
             throw HfException(describeNetworkError(t), t)
         }
     }
+
+    private fun <T> cached(map: ConcurrentHashMap<String, CacheEntry<T>>, key: String): T? {
+        val entry = map[key] ?: return null
+        if (entry.expiresAt <= System.currentTimeMillis()) {
+            map.remove(key)
+            return null
+        }
+        return entry.value
+    }
+
+    private fun isRateLimited(t: Throwable): Boolean =
+        t is HttpException && t.code() == 429
 
     private suspend fun textColumnsFromRows(
         datasetId: String,
@@ -89,14 +118,16 @@ class HfRepository(private val bundle: HfApiBundle = HfClient.create()) : AiData
         splits: List<String>
     ): List<String> {
         for (split in splits) {
-            val columns = runCatching {
-                retryTransient {
+            try {
+                val columns = retryTransient {
                     bundle.serverApi.rows(datasetId, config, split, 0, 1).features
                         .filter { isTextFeature(it) }
                         .map { it.name }
                 }
-            }.getOrDefault(emptyList())
-            if (columns.isNotEmpty()) return columns
+                if (columns.isNotEmpty()) return columns
+            } catch (t: Throwable) {
+                if (isRateLimited(t)) throw t
+            }
         }
         return emptyList()
     }
@@ -161,6 +192,7 @@ class HfRepository(private val bundle: HfApiBundle = HfClient.create()) : AiData
 
                 val stats = DownloadStats(writtenRows, writtenBytes, preview.toString())
                 onProgress(stats)
+                delay(200L)
             }
         }
 
@@ -174,22 +206,39 @@ class HfRepository(private val bundle: HfApiBundle = HfClient.create()) : AiData
     }
 
     private suspend fun <T> retryTransient(block: suspend () -> T): T {
-        var last: Throwable? = null
-        repeat(3) { attempt ->
+        var attempt = 0
+        while (true) {
             try {
                 return block()
             } catch (t: Throwable) {
-                val transient = t is IOException ||
-                    (t is HttpException && t.code() in setOf(429, 500, 502, 503, 504))
-                if (!transient || attempt == 2) throw t
-                last = t
-                delay(1_500L * (attempt + 1))
+                val code = (t as? HttpException)?.code()
+                val rateLimited = code == 429
+                val transient = t is IOException || rateLimited ||
+                    code == 500 || code == 502 || code == 503 || code == 504
+                val maxAttempts = if (rateLimited) 4 else 3
+                if (!transient || attempt >= maxAttempts - 1) throw t
+                val retryAfter = (t as? HttpException)?.response()?.headers()
+                    ?.get("Retry-After")?.toLongOrNull()
+                val seconds = when {
+                    rateLimited -> retryAfter?.coerceIn(1L, 120L) ?: RATE_LIMIT_WAIT_SECONDS[attempt]
+                    else -> retryAfter?.coerceIn(1L, 30L) ?: (2L * (attempt + 1))
+                }
+                onThrottle(
+                    if (rateLimited) {
+                        "Hugging Face rate limit; waiting ${seconds}s before retrying"
+                    } else {
+                        "Hugging Face is busy; retrying in ${seconds}s"
+                    }
+                )
+                delay(seconds * 1_000L)
+                attempt++
             }
         }
-        throw last ?: IllegalStateException("request failed")
     }
 
     companion object {
+        private const val CACHE_TTL_MS = 10 * 60 * 1_000L
+        private val RATE_LIMIT_WAIT_SECONDS = longArrayOf(5, 20, 60)
 
         fun textColumns(features: Map<String, JsonObject>): List<String> {
             return features.entries

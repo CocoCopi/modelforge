@@ -147,7 +147,8 @@ fun describeNetworkError(t: Throwable): String {
         msg.contains("401") -> "Hugging Face rejected the credential (HTTP 401). Check the token."
         msg.contains("403") -> "Hugging Face denied access (HTTP 403). The dataset may be gated; add a valid token."
         msg.contains("404") -> "Dataset, config or split was not found (HTTP 404)."
-        msg.contains("429") -> "Hugging Face rate limit reached (HTTP 429). Wait a minute and retry."
+        msg.contains("429") -> "Hugging Face rate limit reached (HTTP 429). The app retried with " +
+            "backoff; wait a minute, add a Hugging Face token on Home for higher limits, or switch network."
         msg.contains("timeout", ignoreCase = true) -> "The request timed out. Check the connection and retry."
         else -> "Network error: $msg"
     }

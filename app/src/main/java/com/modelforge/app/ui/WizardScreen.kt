@@ -364,6 +364,13 @@ private fun AiPlanStep(vm: ModelForgeViewModel, state: WizardState) {
         ai.error?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = ForgeColors.error)
         }
+        if (!ai.busy && ai.plan != null && ai.error != null) {
+            ForgeOutlineButton(
+                "Retry dataset downloads",
+                onClick = vm::retryAiDatasets,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
         if (ai.busy) {
             Hairline()
             Text(

@@ -25,15 +25,19 @@ class HfRepositoryStructureTest {
 
     private inner class FakeServerApi : HfDatasetServerApi {
         var rowCalls = 0
+        var infoCalls = 0
 
-        override suspend fun info(dataset: String): DatasetInfoResponse = DatasetInfoResponse(
-            dataset_info = mapOf(
-                "default" to DatasetInfoEntry(
-                    features = emptyMap(),
-                    splits = mapOf("train" to SplitMeta())
+        override suspend fun info(dataset: String): DatasetInfoResponse {
+            infoCalls++
+            return DatasetInfoResponse(
+                dataset_info = mapOf(
+                    "default" to DatasetInfoEntry(
+                        features = emptyMap(),
+                        splits = mapOf("train" to SplitMeta())
+                    )
                 )
             )
-        )
+        }
 
         override suspend fun splits(dataset: String): SplitsResponse = SplitsResponse(
             splits = listOf(SplitEntry(dataset = dataset, config = "default", split = "train"))
@@ -57,6 +61,16 @@ class HfRepositoryStructureTest {
         val repo = HfRepository(HfApiBundle(FakePublicApi(), server))
         val structure = repo.structure("owner/data")
         assertEquals(listOf("text"), structure.configs.single().textColumns)
+        assertEquals(1, server.rowCalls)
+    }
+
+    @Test
+    fun reuses_structure_cache_to_avoid_rate_limit_pressure() = runBlocking {
+        val server = FakeServerApi()
+        val repo = HfRepository(HfApiBundle(FakePublicApi(), server))
+        repo.structure("owner/data")
+        repo.structure("owner/data")
+        assertEquals(1, server.infoCalls)
         assertEquals(1, server.rowCalls)
     }
 }
