@@ -9,7 +9,7 @@ quantization-aware training, writes checkpoints, and exports packed 2/3/4/8-bit
 models. The playground generates text from either the full-precision checkpoint
 or a packed export and can share the packed file.
 
-Status: v2.0.5 production build. The repository builds and tests on GitHub
+Status: v2.0.6 production build. The repository builds and tests on GitHub
 Actions and publishes a signed release APK/AAB. See
 [Honest limitations](#honest-limitations) before relying on model quality.
 
@@ -42,7 +42,9 @@ Actions and publishes a signed release APK/AAB. See
   training recipe and downloads verified datasets into the mix automatically.
   Unavailable or invented dataset configs are rejected with a visible reason; if
   every AI suggestion fails, the app tries a small list of verified starter
-  datasets. The NVIDIA key is encrypted on device and never logged.
+  datasets. The NVIDIA key is encrypted on device and never logged. Tool replies are
+  parsed tolerantly, and a direct plan is retried if the model ignores the tool
+  protocol.
 - **Three architecture paths** - traditional transformer (trainable), NCM
   (planning-only) and AI-designed architecture (planning-only), with honest
   gating so the wizard never claims to train an engine that does not exist.
@@ -67,12 +69,12 @@ Actions and publishes a signed release APK/AAB. See
 - NCM and the AI-designed architecture are planning paths only; they have no
   native trainer yet.
 
-## Install (v2.0.5)
+## Install (v2.0.6)
 
 1. Open [Releases](https://github.com/CocoCopi/modelforge/releases) and download
-   the latest `ModelForge-2.0.5-arm64.apk` directly.
+   the latest `ModelForge-2.0.6-arm64.apk` directly.
 2. Install it on an arm64 Android 8.0+ phone, for example
-   `adb install ModelForge-2.0.5-arm64.apk`.
+   `adb install ModelForge-2.0.6-arm64.apk`.
 3. If an older development build is installed, uninstall it once. Older CI
    builds used an ephemeral debug certificate.
 4. Allow the notification permission when prompted so training controls are
@@ -83,7 +85,7 @@ AAB is attached for store distribution. Updating from v2.0.0 or later keeps app 
 
 ### AI architect troubleshooting
 
-v2.0.5 uses `reasoning_effort: none`, shows elapsed time, stream-event count and
+v2.0.6 uses `reasoning_effort: none`, shows elapsed time, stream-event count and
 the current dataset being checked/downloaded, and offers **Cancel request**. A
 timeout with 0 events usually means the phone cannot reach
 `integrate.api.nvidia.com`; try switching Wi-Fi/mobile data or VPN. A 401/403
