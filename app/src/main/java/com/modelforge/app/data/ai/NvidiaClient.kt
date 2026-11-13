@@ -11,6 +11,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
+import com.modelforge.app.diagnostics.ForgeLog
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -102,6 +103,53 @@ class NvidiaClient(
 
     fun cancel() {
         activeCall?.cancel()
+    }
+
+    suspend fun validateKey(apiKey: String): String = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) throw AiException("No NVIDIA API key saved.")
+        val request = Request.Builder()
+            .url(MODELS_URL)
+            .header("Authorization", "Bearer ${apiKey.trim()}")
+            .get()
+            .build()
+        val call = client.newCall(request)
+        activeCall = call
+        try {
+            call.execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val hint = when (response.code) {
+                        401, 403 -> "The key was rejected or cannot use this model."
+                        404 -> "The models endpoint was not found."
+                        429 -> "NVIDIA is rate-limiting this key; try again shortly."
+                        in 500..599 -> "NVIDIA is temporarily unavailable."
+                        else -> "The hosted request failed."
+                    }
+                    throw AiException("NVIDIA HTTP ${response.code}: $hint")
+                }
+                val root = runCatching {
+                    Json.parseToJsonElement(body) as? JsonObject
+                }.getOrNull()
+                val ids = (root?.get("data") as? JsonArray)
+                    ?.mapNotNull { entry ->
+                        ((entry as? JsonObject)?.get("id") as? JsonPrimitive)?.contentOrNull
+                    }
+                    .orEmpty()
+                if (ids.isEmpty()) {
+                    "Key accepted; NVIDIA returned no model list."
+                } else if (MODEL in ids) {
+                    "Key accepted; $MODEL is available."
+                } else {
+                    "Key accepted; $MODEL was not listed for this account."
+                }
+            }
+        } catch (t: AiException) {
+            throw t
+        } catch (t: Throwable) {
+            throw AiException("Could not validate the NVIDIA key: ${t.message ?: t.javaClass.simpleName}", t)
+        } finally {
+            if (activeCall === call) activeCall = null
+        }
     }
 
     override suspend fun streamChat(
@@ -246,7 +294,9 @@ class NvidiaClient(
                 failure.retryAfter,
                 attempt - 1
             )
-            onRetry("NVIDIA is temporarily unavailable; retrying in ${seconds}s")
+            val notice = "NVIDIA is temporarily unavailable; retrying in ${seconds}s"
+            ForgeLog.warn("nvidia", notice)
+            onRetry(notice)
             delay(seconds * 1_000L)
         }
         @Suppress("UNREACHABLE_CODE")
@@ -255,6 +305,7 @@ class NvidiaClient(
 
     companion object {
         const val INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+        const val MODELS_URL = "https://integrate.api.nvidia.com/v1/models"
         const val MODEL = "minimaxai/minimax-m3.1-flash"
     }
 }

@@ -152,7 +152,18 @@ fun HomeScreen(vm: ModelForgeViewModel) {
                     style = MaterialTheme.typography.bodySmall,
                     color = ForgeColors.inkMuted
                 )
-                ForgeOutlineButton("Design proof", onClick = vm::openGallery)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ForgeOutlineButton(
+                        "Diagnostics",
+                        onClick = vm::openDiagnostics,
+                        modifier = Modifier.weight(1f)
+                    )
+                    ForgeOutlineButton(
+                        "Design proof",
+                        onClick = vm::openGallery,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
             }
         }
     }

@@ -19,6 +19,12 @@ private fun JsonElement?.licenseString(): String? = when (this) {
 }
 
 @Serializable
+data class HfWhoAmI(
+    val name: String = "",
+    val fullname: String? = null
+)
+
+@Serializable
 data class HfDatasetSummary(
     val id: String = "",
     val downloads: Long = 0L,

@@ -23,6 +23,9 @@ interface HfApi {
     suspend fun datasetDetail(
         @Path(value = "id", encoded = true) id: String
     ): HfDatasetDetail
+
+    @GET("api/whoami-v2")
+    suspend fun whoAmI(): HfWhoAmI
 }
 
 interface HfDatasetServerApi {

@@ -18,8 +18,8 @@ android {
         applicationId = "com.modelforge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 10
-        versionName = "2.0.8"
+        versionCode = 11
+        versionName = "2.0.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -48,6 +48,10 @@ android {
 
     buildTypes {
         debug {
+            ndk {
+                abiFilters.clear()
+                abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
+            }
             if (ciKeystore != null) {
                 signingConfig = signingConfigs.getByName("ci")
             }
@@ -134,5 +138,6 @@ dependencies {
     androidTestImplementation(platform("androidx.compose:compose-bom:2024.06.00"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.test:rules:1.5.0")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
 }

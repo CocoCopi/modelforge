@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import com.modelforge.app.diagnostics.ForgeLog
 import retrofit2.HttpException
 import java.io.File
 import java.io.IOException
@@ -50,6 +51,16 @@ class HfRepository(
             )
             detailCache[id] = CacheEntry(summary, System.currentTimeMillis() + CACHE_TTL_MS)
             summary
+        } catch (t: Throwable) {
+            throw HfException(describeNetworkError(t), t)
+        }
+    }
+
+    suspend fun validateToken(): String {
+        return try {
+            val account = retryTransient { bundle.publicApi.whoAmI() }
+            val label = account.fullname?.takeIf { it.isNotBlank() } ?: account.name
+            if (label.isBlank()) "Credential accepted by Hugging Face." else "Credential accepted as $label."
         } catch (t: Throwable) {
             throw HfException(describeNetworkError(t), t)
         }
@@ -223,13 +234,13 @@ class HfRepository(
                     rateLimited -> retryAfter?.coerceIn(1L, 120L) ?: RATE_LIMIT_WAIT_SECONDS[attempt]
                     else -> retryAfter?.coerceIn(1L, 30L) ?: (2L * (attempt + 1))
                 }
-                onThrottle(
-                    if (rateLimited) {
-                        "Hugging Face rate limit; waiting ${seconds}s before retrying"
-                    } else {
-                        "Hugging Face is busy; retrying in ${seconds}s"
-                    }
-                )
+                val notice = if (rateLimited) {
+                    "Hugging Face rate limit; waiting ${seconds}s before retrying"
+                } else {
+                    "Hugging Face is busy; retrying in ${seconds}s"
+                }
+                ForgeLog.warn("hf", notice)
+                onThrottle(notice)
                 delay(seconds * 1_000L)
                 attempt++
             }

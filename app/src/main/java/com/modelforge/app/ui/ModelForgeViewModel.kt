@@ -41,6 +41,10 @@ import com.modelforge.app.data.hf.HfException
 import com.modelforge.app.data.hf.HfRepository
 import com.modelforge.app.data.hf.isLikelyNonCommercial
 import com.modelforge.app.data.tokenizer.BpeTokenizer
+import com.modelforge.app.diagnostics.CheckState
+import com.modelforge.app.diagnostics.DiagnosticCheck
+import com.modelforge.app.diagnostics.DiagnosticsState
+import com.modelforge.app.diagnostics.ForgeLog
 import com.modelforge.app.nativebridge.NativeModel
 import com.modelforge.app.nativebridge.PackedModel
 import com.modelforge.app.training.TrainingService
@@ -60,6 +64,7 @@ sealed class Screen {
     object Home : Screen()
     object Wizard : Screen()
     object Gallery : Screen()
+    object Diagnostics : Screen()
     data class Training(val modelId: String) : Screen()
     data class ModelDetail(val modelId: String) : Screen()
     data class Playground(val modelId: String) : Screen()
@@ -218,6 +223,9 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     private val _notice = MutableStateFlow<String?>(null)
     val notice: StateFlow<String?> = _notice.asStateFlow()
 
+    private val _diagnostics = MutableStateFlow(DiagnosticsState())
+    val diagnostics: StateFlow<DiagnosticsState> = _diagnostics.asStateFlow()
+
     private fun updateWizard(transform: (WizardState) -> WizardState) {
         _wizard.value = transform(_wizard.value).also(::persistDraft)
     }
@@ -263,6 +271,90 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     val identityCheck: StateFlow<IdentityCheckState> = _identityCheck.asStateFlow()
 
     fun openGallery() { _screen.value = Screen.Gallery }
+
+    fun openDiagnostics() { _screen.value = Screen.Diagnostics }
+
+    fun runDiagnostics() {
+        if (_diagnostics.value.running) return
+        _diagnostics.value = DiagnosticsState(
+            running = true,
+            huggingFace = DiagnosticCheck("Hugging Face", CheckState.RUNNING, "Checking public access…"),
+            nvidia = DiagnosticCheck("NVIDIA", CheckState.RUNNING, "Checking the saved key…"),
+            secureStorage = DiagnosticCheck("Secure storage", CheckState.RUNNING, "Checking encrypted storage…")
+        )
+        ForgeLog.info("diagnostics", "Manual checks started")
+        viewModelScope.launch {
+            val secure = DiagnosticCheck(
+                "Secure storage",
+                if (tokenStore.isAvailable) CheckState.PASS else CheckState.WARN,
+                if (tokenStore.isAvailable) {
+                    "EncryptedSharedPreferences is available."
+                } else {
+                    "Unavailable; credentials cannot be stored on this device."
+                }
+            )
+            val hfCheck = checkHuggingFace()
+            val nvidiaCheck = checkNvidia()
+            _diagnostics.value = DiagnosticsState(
+                running = false,
+                huggingFace = hfCheck,
+                nvidia = nvidiaCheck,
+                secureStorage = secure,
+                lastRun = System.currentTimeMillis()
+            )
+            ForgeLog.info(
+                "diagnostics",
+                "Checks finished: Hugging Face=${hfCheck.state.label}, NVIDIA=${nvidiaCheck.state.label}, " +
+                    "secure storage=${secure.state.label}"
+            )
+        }
+    }
+
+    private suspend fun checkHuggingFace(): DiagnosticCheck {
+        val token = tokenStore.token
+        return try {
+            if (token == null) {
+                val results = hf.search("TinyStories", 1)
+                DiagnosticCheck(
+                    "Hugging Face",
+                    CheckState.PASS,
+                    "No token saved; public dataset search is reachable (${results.size} result)."
+                )
+            } else {
+                DiagnosticCheck("Hugging Face", CheckState.PASS, hf.validateToken())
+            }
+        } catch (t: kotlinx.coroutines.CancellationException) {
+            throw t
+        } catch (t: Throwable) {
+            DiagnosticCheck(
+                "Hugging Face",
+                CheckState.FAIL,
+                t.message ?: "Hugging Face check failed."
+            )
+        }
+    }
+
+    private suspend fun checkNvidia(): DiagnosticCheck {
+        val key = tokenStore.nvidiaToken
+        if (key == null) {
+            return DiagnosticCheck(
+                "NVIDIA",
+                CheckState.INFO,
+                "No key saved; AI planning is optional."
+            )
+        }
+        return try {
+            DiagnosticCheck("NVIDIA", CheckState.PASS, nvidia.validateKey(key))
+        } catch (t: kotlinx.coroutines.CancellationException) {
+            throw t
+        } catch (t: Throwable) {
+            DiagnosticCheck(
+                "NVIDIA",
+                CheckState.FAIL,
+                t.message ?: "NVIDIA check failed."
+            )
+        }
+    }
 
     fun manifest(id: String): ModelManifest? = store.loadManifest(id)
 
@@ -437,6 +529,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         }
         tokenStore.nvidiaToken = value
         _aiKeyPresent.value = tokenStore.nvidiaToken != null
+        ForgeLog.info("credentials", "NVIDIA key saved=${tokenStore.nvidiaToken != null}")
         _aiPlanner.value = AiPlannerState(
             error = when {
                 value.isBlank() -> "NVIDIA API key cleared."
@@ -449,6 +542,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     fun clearAiKey() {
         tokenStore.clearNvidia()
         _aiKeyPresent.value = false
+        ForgeLog.info("credentials", "NVIDIA key cleared")
         _aiPlanner.value = AiPlannerState(error = "NVIDIA API key cleared. AI planning is off.")
     }
 
@@ -1528,12 +1622,14 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     fun saveToken(value: String) {
         tokenStore.token = value
         _tokenPresent.value = tokenStore.token != null
+        ForgeLog.info("credentials", "Hugging Face token saved=${tokenStore.token != null}")
         _notice.value = if (value.isBlank()) "Hugging Face token cleared." else "Token saved securely."
     }
 
     fun clearToken() {
         tokenStore.clear()
         _tokenPresent.value = false
+        ForgeLog.info("credentials", "Hugging Face token cleared")
         _notice.value = "Hugging Face token cleared."
     }
 

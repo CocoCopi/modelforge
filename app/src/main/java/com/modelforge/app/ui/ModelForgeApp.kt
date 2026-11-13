@@ -35,6 +35,7 @@ fun ModelForgeRoot(vm: ModelForgeViewModel = viewModel()) {
             is Screen.ModelDetail -> ModelDetailScreen(vm, current.modelId)
             is Screen.Playground -> PlaygroundScreen(vm, current.modelId)
             is Screen.Gallery -> com.modelforge.app.ui.design.DesignGalleryScreen(onBack = vm::goHome)
+            is Screen.Diagnostics -> DiagnosticsScreen(vm)
         }
     }
 }
