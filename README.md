@@ -9,7 +9,7 @@ quantization-aware training, writes checkpoints, and exports packed 2/3/4/8-bit
 models. The playground generates text from either the full-precision checkpoint
 or a packed export and can share the packed file.
 
-Status: v2.0.8 production build. The repository builds and tests on GitHub
+Status: v2.0.9 production build. The repository builds and tests on GitHub
 Actions and publishes a signed release APK/AAB. See
 [Honest limitations](#honest-limitations) before relying on model quality.
 
@@ -55,28 +55,32 @@ Actions and publishes a signed release APK/AAB. See
   language list and identity templates.
 - **Encrypted credentials** - optional Hugging Face and NVIDIA keys in
   `EncryptedSharedPreferences`; no telemetry and no key logging.
+- **Diagnostics** - explicit Hugging Face/NVIDIA credential checks, device and
+  storage facts, redacted structured logs, a local last-crash report, and
+  copy/share actions for support. Reports are only shared when you choose to.
 
 ## Honest limitations
 
 - These are tiny models trained from scratch on a phone. Expect short, simple
   text with repetition and grammar mistakes, not chatbot-level answers.
-- Only `arm64-v8a` is built. There is no x86 emulator or 32-bit build.
+- Release APKs are `arm64-v8a` only. Debug/CI builds also include `x86_64` so the emulator test job can run; no 32-bit build is produced.
 - 2-bit and 3-bit exports are experimental; 4-bit is the recommended default.
 - Training time and memory vary a lot by phone. The app reports measured
   tokens/second, RAM and an ETA instead of guessing.
-- The Compose screens are compiled into the release APK but have not yet been
-  exercised on a physical device in this repository's CI. Native engine
+- The Compose screens are compiled into the release APK. CI now launches them
+  on an x86_64 emulator and opens Diagnostics; physical-device coverage is still
+  needed for phone-specific performance and thermal behaviour. Native engine
   behaviour, checkpoint resume and packed inference are covered by host C++
   tests.
 - NCM and the AI-designed architecture are planning paths only; they have no
   native trainer yet.
 
-## Install (v2.0.8)
+## Install (v2.0.9)
 
 1. Open [Releases](https://github.com/CocoCopi/modelforge/releases) and download
-   the latest `ModelForge-2.0.8-arm64.apk` directly.
+   the latest `ModelForge-2.0.9-arm64.apk` directly.
 2. Install it on an arm64 Android 8.0+ phone, for example
-   `adb install ModelForge-2.0.8-arm64.apk`.
+   `adb install ModelForge-2.0.9-arm64.apk`.
 3. If an older development build is installed, uninstall it once. Older CI
    builds used an ephemeral debug certificate.
 4. Allow the notification permission when prompted so training controls are
@@ -87,7 +91,7 @@ AAB is attached for store distribution. Updating from v2.0.0 or later keeps app 
 
 ### AI architect troubleshooting
 
-v2.0.8 uses `reasoning_effort: none`, shows elapsed time, stream-event count and
+v2.0.9 uses `reasoning_effort: none`, shows elapsed time, stream-event count and
 the current dataset being checked/downloaded, and offers **Cancel request**. A
 timeout with 0 events usually means the phone cannot reach
 `integrate.api.nvidia.com`; try switching Wi-Fi/mobile data or VPN. A 401/403
@@ -98,12 +102,12 @@ suggestion fails, the app retries with verified starter datasets; if those also
 fail, check the connection or add data manually from the dataset step.
 
 An NVIDIA **HTTP 503** with `content safety screening is temporarily
-unavailable` is a server-side outage, not a bad key or prompt. v2.0.8 retries
+unavailable` is a server-side outage, not a bad key or prompt. v2.0.9 retries
 `429` and all `5xx` responses automatically, honoring `Retry-After` and
 otherwise waiting 5s, 15s and 30s. The AI screen shows the wait. If all four
 attempts fail, wait a minute and tap **Ask AI to design** again.
 
-If downloads hit **HTTP 429**, v2.0.8 retries with `Retry-After`/exponential
+If downloads hit **HTTP 429**, v2.0.9 retries with `Retry-After`/exponential
 backoff, caches dataset metadata, and paces row pages. When the limit persists it
 stops instead of hammering the endpoint, keeps the AI plan, and shows **Retry
 dataset downloads**. Wait a minute, add a Hugging Face token on Home for higher

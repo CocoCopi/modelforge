@@ -9,14 +9,18 @@ ModelForge has no analytics, telemetry, advertising or crash-upload service.
 - The optional Hugging Face token and optional NVIDIA API key are stored with
   Android `EncryptedSharedPreferences`. They are not written to logs, model
   cards or exported model files.
+- Structured diagnostics logs are held in memory and a last-crash report is
+  stored in the app's private files. Both are redacted and never uploaded
+  automatically. A diagnostics report leaves the device only when you tap
+  **Copy report** or **Share**.
 - Android backup is disabled for the app.
 
 ## Network requests
 
 - Hugging Face (`huggingface.co`) is contacted for dataset search, metadata,
   rows and optional gated access. A saved Hugging Face token is sent only there.
-- NVIDIA (`integrate.api.nvidia.com`) is contacted only when you press the AI
-  design button. The prompt includes the model name, creator, architecture,
+- NVIDIA (`integrate.api.nvidia.com`) is contacted when you press the AI design
+  button or run the NVIDIA diagnostic check. The prompt includes the model name, creator, architecture,
   modalities, languages, training-time budget and other wizard choices. The
   NVIDIA key is sent only to NVIDIA.
 - No other network endpoints are used.

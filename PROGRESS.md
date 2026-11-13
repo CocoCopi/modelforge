@@ -685,3 +685,110 @@ Status: DONE - CI run 43401231533 green after fixing a compile error from run
 
 Limitations: a persistent 503 still depends on NVIDIA restoring the content
 safety screening service. Retrying cannot bypass a server-side outage.
+
+## Full-spec audit (v2.0.9)
+
+Status: IN PROGRESS - audit complete, implementation has started with diagnostics.
+This section is the working checklist for the larger request. Nothing below is
+claimed as complete unless it says so.
+
+### Verified gaps that still block the full specification
+
+- **Native engine is still text-only.** NCM and the AI-designed architecture are
+  planning paths, not runnable trainers. `ArchitectureRegistry` still labels
+  them `Experimental`/`Planned` and blocks training honestly.
+- **Artificial native limits remain.** The worker pool caps at 8 threads
+  (`app/src/main/cpp/core/gpt.cpp:31`). Context is bounded by a learned absolute
+  position table and `T > cfg_.context` is rejected or truncated
+  (`gpt.cpp:694`, `:1422`, `:845`, `:1499`). Packed export accepts only 2/3/4/8
+  bits (`gpt.cpp:1120-1122`). The quantization group is hardcoded to 32
+  (`gpt.cpp:1124-1126`, `gpt.h:77`, `TrainingService.kt:659`). Attention still
+  materializes `B*H*T*T` scores (`gpt.cpp:291`), which limits long contexts.
+- **Artificial product limits remain.** `HardwareDetector` has an uncompromising
+  `ABSOLUTE_MAX_PARAMS = 200_000_000` (`HardwareDetector.kt:42`). The default
+  target is clamped to 5M (`ArchitectureRegistry.kt`). Training time is clamped
+  to 15-480 minutes, steps to 100-2000, corpus characters to 2M, and the wizard
+  still exposes only 128/256/512 context presets. These must become warnings,
+  not silent caps.
+- **Wizard/spec mismatch.** Production has 15 steps including `AI_PLAN` and
+  `TRAINING_TIME` (`WizardSteps.kt:65-70`), but the design gallery still encodes
+  14 (`DesignGalleryScreen.kt:113-114`). The training-budget step is
+  under-built (`WizardScreen.kt:286-301`). Input/output modalities are stacked
+  instead of the required two-column layout (`WizardScreen.kt:235-240`,
+  `:261-277`). Architecture cards and non-text modalities still dead-end
+  (`WizardScreen.kt:191-228`, `:1118-1128`, `:252-254`, `:1122-1124`, `:727-728`).
+- **Hugging Face pipeline is incomplete.** Search/detail/structure use the
+  datasets-server APIs, but there is no listing of repository Parquet files,
+  no raw `resolve/main` fallback, no Parquet reader, no resumable HTTP range
+  download, and only scalar string feature decoding
+  (`HfApi.kt:35-42`, `HfRepository.kt:135-206`, `:147`, `:153-154`, `:177-181`,
+  `:243-258`). `downloadText` restarts at offset 0 and truncates the destination
+  on resume. There is no Arrow/Parquet dependency
+  (`app/build.gradle.kts:109-127`).
+- **AI architect is narrower than requested.** It has bounded `search` and
+  `inspect` tools plus `final`, but no `plan`, `files`, `file`, `test_load`, or
+  general service fallback chain. The existing fallback is a fixed verified
+  starter list (`AiDatasetFallbacks.kt:3-89`), not a runtime HF fallback chain
+  (`raw resolve` -> `list tree` -> `SEQ` -> parquet).
+- **Diagnostics coverage is partial.** 2.0.9 adds the screen, global crash
+  handler, redacted logs, HF `whoami` validation and NVIDIA model-list
+  validation. Still missing: automated emulator flows for training/export,
+  mocked 401/403/404/429/503 tests, and physical-device thermal runs.
+- **Export/quality gates are not yet complete.** Model card and every export mode
+  still need explicit tests. Full build requires arm64 release, x86_64 debug,
+  unit tests, native tests, emulator smoke/e2e and screenshot verification.
+
+### Changed in v2.0.9
+
+- Added `DiagnosticsScreen`, `CrashGuard`, `ForgeLog`, `SecretRedactor`,
+  `DeviceReport` and `DiagnosticsReport`.
+- Added explicit HF/NVIDIA credential checks and secure-storage status.
+- Added x86_64 to debug builds only and an emulator CI job; release remains
+  arm64-v8a.
+- Added `SecretRedactorTest` and an emulator smoke test that opens Diagnostics.
+- No architecture status labels or hard training caps were removed in this step;
+  removing them without the replacement engines would make the UI dishonest.
+
+### Execution order for the remaining work
+
+1. Finish the design/wizard contract and remove silent caps only together with
+   warnings, estimates and graceful failure.
+2. Expand HF data: tree/Parquet/raw fallback, resumable downloads and non-text
+   decoding with tests.
+3. Extend the native transformer to long context and the full bit-width/thread
+   matrix, then add measured quality gates.
+4. Implement NCM training, the AI architecture DSL/runtime, and all five input/
+   output modality paths.
+5. Add full emulator end-to-end flows, mocked-service tests, diagnostics export
+   and release verification for every architecture and modality.
+
+## Production release v2.0.9 - diagnostics and emulator CI
+
+Status: DONE - CI run 43411445495 green (build + x86_64 emulator UI tests).
+Earlier attempts failed on a `DiagnosticsScreen` argument type, the HF fake API
+not implementing `whoAmI`, the notification permission dialog stealing focus,
+an off-screen LazyColumn target, and an invalid Compose test import; each was
+fixed and rerun.
+
+- Added the Diagnostics screen with app/device/ABI/heap/storage/battery/thermal
+  facts, HF and NVIDIA checks, secure-storage state, redacted logs, last crash,
+  copy and share.
+- Added a global uncaught-exception handler that writes a redacted local crash
+  report before delegating to the platform handler.
+- Added bounded structured logs and redaction for HF tokens, NVIDIA keys,
+  Bearer headers and key/token/password assignments.
+- Added HF `whoami-v2` validation and NVIDIA `/v1/models` validation.
+- Debug APK now contains `arm64-v8a` and `x86_64`; release APK/AAB remain arm64.
+- CI added an x86_64 Pixel 6 emulator job with notification permission granted
+  and two Compose smoke tests (Home and Diagnostics).
+- Version `2.0.9` (`versionCode 11`), signed with the stable key so it updates
+  over 2.0.0-2.0.8. Release:
+  https://github.com/CocoCopi/modelforge/releases/tag/v2.0.9
+- APK SHA-256:
+  `9a8f9f80e45ebb9735c83052b81b5467c598728a0caeb2a6daea98447a291449`
+- AAB SHA-256:
+  `95019ef6d608812405e123a8caa47df23aa1c2f2c4b57ac15e57345856ef1a50`
+
+Limitations: the full architecture/modality engine is still not implemented.
+Cap removal, HF Parquet/resume fallback, NCM, AI architecture runtime, non-text
+training and full end-to-end quality gates remain open as listed above.
