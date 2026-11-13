@@ -567,3 +567,30 @@ Status: DONE - CI run 43367803126 green.
   `cce105aa7487b4d0931081620244e2e875806d62d2a6feeb635523fd6b328539`
 - AAB SHA-256:
   `6bf18323669a8456953426c0c90ac22a0b1a6a34fedd10fd5fc17ec0e8d0ddd4`
+
+## Production release v2.0.5 - live Hugging Face tool loop
+
+Status: DONE - CI runs 43371588988 and 43372121583 green.
+
+- Replaced the one-shot AI plan request with `AiDatasetAgent`, a bounded tool
+  loop (maximum 6 model turns, 7-minute budget). The AI can call:
+  - `{"action":"search","query":"...","limit":8}` for real Hugging Face search
+    results, download counts and licences;
+  - `{"action":"inspect","dataset_id":"owner/name","config":"..."}` for real
+    configs, splits, text columns and licence;
+  - `{"action":"final","plan":{...}}` only after using a tool.
+- Final plans are verified against actual metadata through `AiDatasetResolver`.
+  Real config/split/columns are copied into the plan; unverifiable datasets are
+  dropped with warnings. Unverified finals are sent back to the AI for another
+  tool turn.
+- Added `AiChat` and `AiDatasetSource` interfaces plus `AiDatasetAgentTest` with
+  scripted search/inspect/final flows and a rejected-unverified-plan retry.
+- The agent cannot run arbitrary shell commands. It only gets typed Hugging Face
+  search/metadata tools; downloads remain in the app's private model directory.
+- Version `2.0.5` (`versionCode 7`), signed with the stable key so it updates
+  over 2.0.0-2.0.4. Release:
+  https://github.com/CocoCopi/modelforge/releases/tag/v2.0.5
+- APK SHA-256:
+  `e0cc9de00dbb38b7046a8600ef91fd2268e8dc5444f1b1cc7a1f9efdd47fe0e3`
+- AAB SHA-256:
+  `07505971ccf52ea03ce1b58618f01262e36262cbc751969b5409b12ab37e39e6`
