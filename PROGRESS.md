@@ -622,3 +622,35 @@ Status: DONE - CI run 43374392558 green.
   `d4fab67250bc259d75fbbb5e862961606074139ee0283b968a18e7a54c5530db`
 - AAB SHA-256:
   `6a7354be90baed8ca3f8b1a48ae0e734c5f344339abfd5a15de603d6481476ad`
+
+## Production release v2.0.7 - Hugging Face rate-limit recovery
+
+Status: DONE - CI run 43381804014 green.
+
+- Reported issue: all six AI dataset suggestions and the verified fallbacks
+  failed with "Hugging Face rate limit reached (HTTP 429)".
+- `HfRepository` now retries `429` four times, honoring `Retry-After` and
+  otherwise waiting 5s, 20s and 60s. The current wait is shown in the AI stage.
+- Added a 10-minute in-memory cache for dataset details and structures. The AI
+  inspection, final verification and download steps reuse metadata instead of
+  repeatedly calling `/info`, `/splits` and `/rows`.
+- Row pages are paced with a 200ms delay. Automatic downloads are capped at six
+  suggestions with 100-1000 rows each to reduce request pressure.
+- A persistent `429` now stops the download loop instead of hammering the
+  endpoint. The AI plan is kept and the error explains how to recover.
+- Added **Retry dataset downloads**, which reuses the existing plan and cached
+  metadata without another NVIDIA request.
+- Search, detail, info and splits calls now share the same retry path; a `429`
+  from `/info` no longer falls through to `/splits` and doubles the pressure.
+- Added a cache test in `HfRepositoryStructureTest`.
+- Version `2.0.7` (`versionCode 9`), signed with the stable key so it updates
+  over 2.0.0-2.0.6. Release:
+  https://github.com/CocoCopi/modelforge/releases/tag/v2.0.7
+- APK SHA-256:
+  `b09d62743c8961cb43b4e01e3dd0408b86f380b4f2917a50b8bda4b7999a13c0`
+- AAB SHA-256:
+  `40d0587d778b345a849d243842d935efb1943105a762f20eb98f189a3c40816a`
+
+Limitations: Hugging Face still controls the rate limit. A Hugging Face token
+on Home is the most reliable way to raise it; without a token, waiting or
+switching networks may be required even with backoff and pacing.
