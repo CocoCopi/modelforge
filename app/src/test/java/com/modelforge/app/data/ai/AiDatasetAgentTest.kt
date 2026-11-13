@@ -46,6 +46,7 @@ class AiDatasetAgentTest {
     fun rejects_unverified_final_choices_and_retries() {
         val chat = ScriptedChat(
             mutableListOf(
+                """{"action":"search","query":"stories","limit":3}""",
                 """{"action":"final","plan":{"datasets":[{"dataset_id":"owner/missing"}]}}""",
                 finalPlan
             )
