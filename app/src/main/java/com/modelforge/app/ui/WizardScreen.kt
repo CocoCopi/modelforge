@@ -439,7 +439,22 @@ private fun AiPlanStep(vm: ModelForgeViewModel, state: WizardState) {
                     ai.busy -> "checking"
                     else -> "selected"
                 }
-                AiDatasetRow(suggestion, status)
+                AiDatasetRow(suggestion, status, ai.skippedDatasetReasons[suggestion.datasetId])
+            }
+            if (!ai.busy && ai.skippedDatasetReasons.isNotEmpty()) {
+                Hairline()
+                Text(
+                    "Why some suggestions were skipped",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = ForgeColors.ochreInk
+                )
+                ai.skippedDatasetReasons.entries.take(5).forEach { (id, reason) ->
+                    Text(
+                        "$id — $reason",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ForgeColors.ochreInk
+                    )
+                }
             }
             ForgeOutlineButton(
                 "Open dataset mix",
@@ -474,7 +489,7 @@ private fun AiPlanStep(vm: ModelForgeViewModel, state: WizardState) {
 }
 
 @Composable
-private fun AiDatasetRow(suggestion: AiDatasetSuggestion, status: String) {
+private fun AiDatasetRow(suggestion: AiDatasetSuggestion, status: String, skipReason: String?) {
     val tint = when (status) {
         "downloaded" -> ForgeColors.verdigris
         "not used" -> ForgeColors.ochreInk
@@ -505,6 +520,9 @@ private fun AiDatasetRow(suggestion: AiDatasetSuggestion, status: String) {
         }
         if (suggestion.reason.isNotBlank()) {
             Text(suggestion.reason, style = MaterialTheme.typography.bodySmall, color = ForgeColors.inkMuted)
+        }
+        if (!skipReason.isNullOrBlank()) {
+            Text(skipReason, style = MaterialTheme.typography.bodySmall, color = ForgeColors.ochreInk)
         }
     }
 }
@@ -1010,6 +1028,13 @@ private fun ReviewStep(vm: ModelForgeViewModel, state: WizardState) {
                     style = MaterialTheme.typography.bodySmall,
                     color = ForgeColors.ochreInk
                 )
+                ai.skippedDatasetReasons.entries.take(3).forEach { (id, reason) ->
+                    Text(
+                        "$id — $reason",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ForgeColors.ochreInk
+                    )
+                }
             }
             ai.plan?.warnings?.take(3)?.forEach {
                 Text("· $it", style = MaterialTheme.typography.bodySmall, color = ForgeColors.ochreInk)

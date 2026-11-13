@@ -25,7 +25,9 @@ import com.modelforge.app.data.TrainingLiveState
 import com.modelforge.app.data.TrainingSettings
 import com.modelforge.app.data.WizardDraft
 import com.modelforge.app.data.WizardDraftStore
+import com.modelforge.app.data.ai.AiDatasetFallbacks
 import com.modelforge.app.data.ai.AiDatasetResolver
+import com.modelforge.app.data.ai.AiDatasetSuggestion
 import com.modelforge.app.data.ai.AiPlan
 import com.modelforge.app.data.ai.AiPlanRequest
 import com.modelforge.app.data.ai.AiPlanner
@@ -121,6 +123,7 @@ data class AiPlannerState(
     val stage: String = "",
     val appliedDatasetIds: Set<String> = emptySet(),
     val skippedDatasetIds: Set<String> = emptySet(),
+    val skippedDatasetReasons: Map<String, String> = emptyMap(),
     val startedAt: Long = 0L,
     val events: Int = 0,
     val error: String? = null
@@ -500,7 +503,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                     events = _aiPlanner.value.events
                 )
                 applyAiTraining(plan.training)
-                autoApplyDatasets(plan)
+                autoApplyDatasets(plan, req)
                 val applied = _aiPlanner.value.appliedDatasetIds
                 val skipped = _aiPlanner.value.skippedDatasetIds
                 val datasetCount = _wizard.value.datasets.size
@@ -510,26 +513,38 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                             it.copy(step = WizardStep.REVIEW.ordinal, error = null)
                         } else it.copy(error = null)
                     }
+                    val fallbackApplied = applied - plan.datasets.map { it.datasetId }.toSet()
                     _aiPlanner.update {
                         it.copy(
                             busy = false,
                             applied = true,
-                            stage = if (applied.isEmpty()) {
-                                "Applied training settings; kept the existing dataset mix."
-                            } else {
-                                "Applied training settings and downloaded ${applied.size} dataset(s)." +
+                            stage = when {
+                                applied.isEmpty() -> "Applied training settings; kept the existing dataset mix."
+                                fallbackApplied.isNotEmpty() -> "AI suggestions were unavailable; downloaded " +
+                                    "${fallbackApplied.size} verified starter dataset(s)." +
+                                    if (skipped.isEmpty()) "" else " Skipped ${skipped.size} suggestion(s)."
+                                else -> "Applied training settings and downloaded ${applied.size} dataset(s)." +
                                     if (skipped.isEmpty()) "" else " Skipped ${skipped.size} unavailable suggestion(s)."
                             }
                         )
                     }
                 } else {
+                    val reasons = _aiPlanner.value.skippedDatasetReasons.values
+                        .distinct()
+                        .take(2)
+                        .joinToString(" ")
                     _aiPlanner.update {
                         it.copy(
                             busy = false,
                             applied = false,
                             stage = "Training settings applied.",
-                            error = "The AI chose datasets, but none could be verified and downloaded. " +
-                                "Open the dataset step to choose one manually, or redesign."
+                            error = if (plan.datasets.isEmpty()) {
+                                "The AI returned no usable dataset suggestions, and the verified " +
+                                    "fallbacks could not be downloaded. Check your connection and retry. $reasons"
+                            } else {
+                                "None of the AI's ${plan.datasets.size} dataset suggestion(s) could be " +
+                                    "downloaded, and the verified fallbacks failed too. $reasons"
+                            }.trim()
                         )
                     }
                 }
@@ -587,78 +602,111 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun autoApplyDatasets(plan: AiPlan) {
+    private suspend fun autoApplyDatasets(plan: AiPlan, request: AiPlanRequest) {
         val modelId = _wizard.value.modelId ?: return
         val dataDir = store.dataDir(modelId)
+        val before = _wizard.value.datasets.size
         val suggestions = plan.datasets.take(8)
         for ((position, suggestion) in suggestions.withIndex()) {
+            tryApplyDataset(suggestion, "${position + 1}/${suggestions.size}", dataDir)
+        }
+        if (_wizard.value.datasets.size > before || _wizard.value.datasets.isNotEmpty()) return
+
+        val fallbacks = AiDatasetFallbacks.forRequest(
+            languages = request.languages,
+            toolCalling = request.toolCalling,
+            reasoning = request.reasoning
+        ).filter { fallback -> suggestions.none { it.datasetId == fallback.datasetId } }
+        var fallbacksApplied = 0
+        for ((position, fallback) in fallbacks.withIndex()) {
             currentCoroutineContext().ensureActive()
-            val id = suggestion.datasetId.trim()
-            if (id.isBlank()) continue
-            if (_wizard.value.datasets.any { it.datasetId == id }) {
-                _aiPlanner.update {
-                    it.copy(skippedDatasetIds = it.skippedDatasetIds + id, stage = "Already in the mix: $id")
-                }
-                continue
+            _aiPlanner.update { it.copy(stage = "Trying verified starter data ${position + 1}/${fallbacks.size}") }
+            if (tryApplyDataset(fallback, "fallback ${position + 1}/${fallbacks.size}", dataDir)) {
+                fallbacksApplied++
+                if (fallbacksApplied >= 2) return
             }
-            val label = "${position + 1}/${suggestions.size}"
-            _aiPlanner.update { it.copy(stage = "Checking $id ($label)") }
-            val destination = File(dataDir, "ai_${UUID.randomUUID()}.txt")
-            try {
-                val detail = hf.detail(id)
-                val structure = hf.structure(id)
-                val resolved = AiDatasetResolver.resolve(structure, suggestion)
-                    ?: throw HfException("No usable text config, split or column was found.")
-                val rows = suggestion.rows.coerceIn(100, 1500)
-                val maxBytes = (rows.toLong() * 2048L).coerceIn(256_000L, 1_500_000L)
-                _aiPlanner.update { it.copy(stage = "Downloading $id ($label)") }
-                val stats = hf.downloadText(
-                    datasetId = id,
-                    config = resolved.config,
-                    split = resolved.split,
-                    columns = resolved.columns,
-                    maxRows = rows,
-                    maxBytes = maxBytes,
-                    destination = destination
-                ) { progress ->
-                    _aiPlanner.update {
-                        it.copy(stage = "Downloading $id · ${progress.rows} rows ($label)")
-                    }
-                }
-                currentCoroutineContext().ensureActive()
-                val license = detail.resolvedLicense()
-                val entry = DatasetMixEntry(
-                    datasetId = id,
-                    config = resolved.config,
-                    split = resolved.split,
-                    columns = resolved.columns,
-                    weight = suggestion.weight.coerceIn(0.1f, 5f),
-                    cacheFile = destination.name,
-                    rows = stats.rows,
-                    bytes = stats.bytes,
-                    license = license,
-                    nonCommercial = isLikelyNonCommercial(license)
+        }
+    }
+
+    private suspend fun tryApplyDataset(
+        suggestion: AiDatasetSuggestion,
+        label: String,
+        dataDir: File
+    ): Boolean {
+        currentCoroutineContext().ensureActive()
+        val id = suggestion.datasetId.trim()
+        if (id.isBlank()) return false
+        if (_wizard.value.datasets.any { it.datasetId == id }) {
+            _aiPlanner.update {
+                it.copy(
+                    skippedDatasetIds = it.skippedDatasetIds + id,
+                    skippedDatasetReasons = it.skippedDatasetReasons + (id to "Already in the dataset mix."),
+                    stage = "Already in the mix: $id"
                 )
-                updateWizard { it.copy(datasets = it.datasets + entry, error = null) }
+            }
+            return false
+        }
+        _aiPlanner.update { it.copy(stage = "Checking $id ($label)") }
+        val destination = File(dataDir, "ai_${UUID.randomUUID()}.txt")
+        return try {
+            val detail = hf.detail(id)
+            val structure = hf.structure(id)
+            val resolved = AiDatasetResolver.resolve(structure, suggestion)
+                ?: throw HfException("No usable text config, split or column was found.")
+            val rows = suggestion.rows.coerceIn(100, 1500)
+            val maxBytes = (rows.toLong() * 2048L).coerceIn(256_000L, 1_500_000L)
+            _aiPlanner.update { it.copy(stage = "Downloading $id ($label)") }
+            val stats = hf.downloadText(
+                datasetId = id,
+                config = resolved.config,
+                split = resolved.split,
+                columns = resolved.columns,
+                maxRows = rows,
+                maxBytes = maxBytes,
+                destination = destination
+            ) { progress ->
                 _aiPlanner.update {
-                    it.copy(
-                        appliedDatasetIds = it.appliedDatasetIds + id,
-                        skippedDatasetIds = it.skippedDatasetIds - id,
-                        stage = "Downloaded $id ($label)"
-                    )
-                }
-            } catch (t: kotlinx.coroutines.CancellationException) {
-                destination.delete()
-                throw t
-            } catch (t: Throwable) {
-                destination.delete()
-                _aiPlanner.update {
-                    it.copy(
-                        skippedDatasetIds = it.skippedDatasetIds + id,
-                        stage = "Skipped $id: ${t.message ?: "unavailable"}"
-                    )
+                    it.copy(stage = "Downloading $id · ${progress.rows} rows ($label)")
                 }
             }
+            currentCoroutineContext().ensureActive()
+            val license = detail.resolvedLicense()
+            val entry = DatasetMixEntry(
+                datasetId = id,
+                config = resolved.config,
+                split = resolved.split,
+                columns = resolved.columns,
+                weight = suggestion.weight.coerceIn(0.1f, 5f),
+                cacheFile = destination.name,
+                rows = stats.rows,
+                bytes = stats.bytes,
+                license = license,
+                nonCommercial = isLikelyNonCommercial(license)
+            )
+            updateWizard { it.copy(datasets = it.datasets + entry, error = null) }
+            _aiPlanner.update {
+                it.copy(
+                    appliedDatasetIds = it.appliedDatasetIds + id,
+                    skippedDatasetIds = it.skippedDatasetIds - id,
+                    skippedDatasetReasons = it.skippedDatasetReasons - id,
+                    stage = "Downloaded $id ($label)"
+                )
+            }
+            true
+        } catch (t: kotlinx.coroutines.CancellationException) {
+            destination.delete()
+            throw t
+        } catch (t: Throwable) {
+            destination.delete()
+            val reason = (t.message ?: "unavailable").take(180)
+            _aiPlanner.update {
+                it.copy(
+                    skippedDatasetIds = it.skippedDatasetIds + id,
+                    skippedDatasetReasons = it.skippedDatasetReasons + (id to reason),
+                    stage = "Skipped $id: $reason"
+                )
+            }
+            false
         }
     }
 

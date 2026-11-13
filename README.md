@@ -9,7 +9,7 @@ quantization-aware training, writes checkpoints, and exports packed 2/3/4/8-bit
 models. The playground generates text from either the full-precision checkpoint
 or a packed export and can share the packed file.
 
-Status: v2.0.3 production build. The repository builds and tests on GitHub
+Status: v2.0.4 production build. The repository builds and tests on GitHub
 Actions and publishes a signed release APK/AAB. See
 [Honest limitations](#honest-limitations) before relying on model quality.
 
@@ -40,8 +40,9 @@ Actions and publishes a signed release APK/AAB. See
   `minimaxai/minimax-m3.1-flash`. It chooses the training recipe and datasets,
   then applies the steps/batch/sequence/learning-rate settings and downloads the
   verified Hugging Face datasets into the mix automatically. Unavailable or
-  hallucinated dataset configs are skipped with a visible reason. The NVIDIA key
-  is encrypted on device and never logged.
+  hallucinated dataset configs are skipped with a visible reason; if every AI
+  suggestion fails, the app tries a small list of verified starter datasets.
+  The NVIDIA key is encrypted on device and never logged.
 - **Three architecture paths** - traditional transformer (trainable), NCM
   (planning-only) and AI-designed architecture (planning-only), with honest
   gating so the wizard never claims to train an engine that does not exist.
@@ -66,12 +67,12 @@ Actions and publishes a signed release APK/AAB. See
 - NCM and the AI-designed architecture are planning paths only; they have no
   native trainer yet.
 
-## Install (v2.0.3)
+## Install (v2.0.4)
 
 1. Open [Releases](https://github.com/CocoCopi/modelforge/releases) and download
-   the latest `ModelForge-2.0.3-arm64.apk` directly.
+   the latest `ModelForge-2.0.4-arm64.apk` directly.
 2. Install it on an arm64 Android 8.0+ phone, for example
-   `adb install ModelForge-2.0.3-arm64.apk`.
+   `adb install ModelForge-2.0.4-arm64.apk`.
 3. If an older development build is installed, uninstall it once. Older CI
    builds used an ephemeral debug certificate.
 4. Allow the notification permission when prompted so training controls are
@@ -82,14 +83,15 @@ AAB is attached for store distribution. Updating from v2.0.0 or later keeps app 
 
 ### AI architect troubleshooting
 
-v2.0.3 uses `reasoning_effort: none`, shows elapsed time, stream-event count and
+v2.0.4 uses `reasoning_effort: none`, shows elapsed time, stream-event count and
 the current dataset being checked/downloaded, and offers **Cancel request**. A
 timeout with 0 events usually means the phone cannot reach
 `integrate.api.nvidia.com`; try switching Wi-Fi/mobile data or VPN. A 401/403
 means the key is invalid or lacks access to the configured model; a 404 means
 that model is not enabled for the account. If the AI suggests datasets that
-cannot be verified, they are skipped and listed; add data manually from the
-dataset step if needed.
+cannot be verified, they are skipped and listed with the reason. When every
+suggestion fails, the app retries with verified starter datasets; if those also
+fail, check the connection or add data manually from the dataset step.
 
 ## Using the app
 

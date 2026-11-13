@@ -230,3 +230,32 @@ class AiDatasetColumnQualityTest {
         assertEquals(null, AiDatasetResolver.resolve(structure, AiDatasetSuggestion(datasetId = "owner/meta")))
     }
 }
+
+class AiDatasetFallbacksTest {
+    @Test
+    fun prefers_tamil_and_tool_data_then_keeps_general_fallbacks() {
+        val plan = AiDatasetFallbacks.forRequest(
+            languages = listOf("Tamil"),
+            toolCalling = true,
+            reasoning = true
+        )
+        assertEquals("mozhi-ai/tamil-corpus", plan.first().datasetId)
+        assertTrue(plan.any { it.datasetId == "glaiveai/glaive-function-calling-v2" })
+        assertTrue(plan.any { it.datasetId == "databricks/databricks-dolly-15k" })
+        assertTrue(plan.any { it.datasetId == "HuggingFaceFW/fineweb-edu" })
+        assertEquals(plan.size, plan.distinctBy { it.datasetId }.size)
+    }
+
+    @Test
+    fun general_requests_still_have_two_verified_fallbacks() {
+        val plan = AiDatasetFallbacks.forRequest(
+            languages = listOf("English"),
+            toolCalling = false,
+            reasoning = false
+        )
+        assertEquals(
+            listOf("databricks/databricks-dolly-15k", "HuggingFaceFW/fineweb-edu"),
+            plan.map { it.datasetId }
+        )
+    }
+}

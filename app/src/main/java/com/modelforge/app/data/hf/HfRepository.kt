@@ -49,7 +49,9 @@ class HfRepository(private val bundle: HfApiBundle = HfClient.create()) {
                         textColumns = textColumns(entry.features)
                     )
                 }
-                return DatasetStructure(datasetId, configs)
+                if (configs.any { it.textColumns.isNotEmpty() }) {
+                    return DatasetStructure(datasetId, configs)
+                }
             }
         } catch (_: Throwable) {
             // Fall through to the splits endpoint; some datasets have no info yet.
@@ -62,19 +64,35 @@ class HfRepository(private val bundle: HfApiBundle = HfClient.create()) {
             val grouped = splits.splits.groupBy { it.config }
             val configs = grouped.map { (config, entries) ->
                 val splitNames = entries.map { it.split }.distinct().sorted()
-                val columns = runCatching {
-                    bundle.serverApi.rows(datasetId, config, splitNames.first(), 0, 1)
-                        .features
-                        .filter { isTextFeature(it) }
-                        .map { it.name }
-                }.getOrDefault(emptyList())
-                DatasetConfigInfo(config, splitNames, columns)
+                DatasetConfigInfo(
+                    config,
+                    splitNames,
+                    textColumnsFromRows(datasetId, config, splitNames)
+                )
             }
             DatasetStructure(datasetId, configs)
         } catch (t: Throwable) {
             if (t is HfException) throw t
             throw HfException(describeNetworkError(t), t)
         }
+    }
+
+    private suspend fun textColumnsFromRows(
+        datasetId: String,
+        config: String,
+        splits: List<String>
+    ): List<String> {
+        for (split in splits) {
+            val columns = runCatching {
+                retryTransient {
+                    bundle.serverApi.rows(datasetId, config, split, 0, 1).features
+                        .filter { isTextFeature(it) }
+                        .map { it.name }
+                }
+            }.getOrDefault(emptyList())
+            if (columns.isNotEmpty()) return columns
+        }
+        return emptyList()
     }
 
     suspend fun downloadText(
