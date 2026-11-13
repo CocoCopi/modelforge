@@ -52,10 +52,10 @@ class HfRepositoryIntegrationTest {
         try {
             val stats = retry {
                 repo.downloadText(
-                    datasetId = "roneneldan/TinyStories",
+                    datasetId = "databricks/databricks-dolly-15k",
                     config = "default",
                     split = "train",
-                    columns = listOf("text"),
+                    columns = listOf("instruction", "response"),
                     maxRows = 3,
                     maxBytes = 200_000,
                     destination = dest

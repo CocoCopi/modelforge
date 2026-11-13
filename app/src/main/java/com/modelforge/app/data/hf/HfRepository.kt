@@ -2,12 +2,15 @@ package com.modelforge.app.data.hf
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import retrofit2.HttpException
 import java.io.File
+import java.io.IOException
 
 class HfRepository(private val bundle: HfApiBundle = HfClient.create()) {
 
@@ -96,13 +99,15 @@ class HfRepository(private val bundle: HfApiBundle = HfClient.create()) {
             while (writtenRows < maxRows && writtenBytes < maxBytes && offset < totalRows) {
                 currentCoroutineContext().ensureActive()
                 val page = try {
-                    bundle.serverApi.rows(
-                        datasetId,
-                        config,
-                        split,
-                        offset,
-                        minOf(pageSize, maxRows - writtenRows)
-                    )
+                    retryTransient {
+                        bundle.serverApi.rows(
+                            datasetId,
+                            config,
+                            split,
+                            offset,
+                            minOf(pageSize, maxRows - writtenRows)
+                        )
+                    }
                 } catch (t: Throwable) {
                     throw HfException(describeNetworkError(t), t)
                 }
@@ -144,7 +149,24 @@ class HfRepository(private val bundle: HfApiBundle = HfClient.create()) {
         DownloadStats(writtenRows, writtenBytes, preview.toString())
     }
 
+    private suspend fun <T> retryTransient(block: suspend () -> T): T {
+        var last: Throwable? = null
+        repeat(3) { attempt ->
+            try {
+                return block()
+            } catch (t: Throwable) {
+                val transient = t is IOException ||
+                    (t is HttpException && t.code() in setOf(429, 500, 502, 503, 504))
+                if (!transient || attempt == 2) throw t
+                last = t
+                delay(1_500L * (attempt + 1))
+            }
+        }
+        throw last ?: IllegalStateException("request failed")
+    }
+
     companion object {
+
         fun textColumns(features: Map<String, JsonObject>): List<String> {
             return features.entries
                 .filter { (_, value) ->
