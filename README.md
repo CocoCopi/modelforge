@@ -9,7 +9,7 @@ quantization-aware training, writes checkpoints, and exports packed 2/3/4/8-bit
 models. The playground generates text from either the full-precision checkpoint
 or a packed export and can share the packed file.
 
-Status: v2.0.2 production build. The repository builds and tests on GitHub
+Status: v2.0.3 production build. The repository builds and tests on GitHub
 Actions and publishes a signed release APK/AAB. See
 [Honest limitations](#honest-limitations) before relying on model quality.
 
@@ -36,10 +36,12 @@ Actions and publishes a signed release APK/AAB. See
   loss chart and samples, model details, an identity check and a playground with
   prompt/temperature/top-k/top-p controls, measured tokens/second, export and
   share.
-- **NVIDIA AI architect** - optional hosted planning using
-  `minimaxai/minimax-m3.1-flash`. It proposes an overview, datasets, rows, mix
-  weights and training settings; every dataset is checked against Hugging Face
-  before download. The NVIDIA key is encrypted on device and never logged.
+- **NVIDIA AI autopilot** - optional hosted planning using
+  `minimaxai/minimax-m3.1-flash`. It chooses the training recipe and datasets,
+  then applies the steps/batch/sequence/learning-rate settings and downloads the
+  verified Hugging Face datasets into the mix automatically. Unavailable or
+  hallucinated dataset configs are skipped with a visible reason. The NVIDIA key
+  is encrypted on device and never logged.
 - **Three architecture paths** - traditional transformer (trainable), NCM
   (planning-only) and AI-designed architecture (planning-only), with honest
   gating so the wizard never claims to train an engine that does not exist.
@@ -64,38 +66,40 @@ Actions and publishes a signed release APK/AAB. See
 - NCM and the AI-designed architecture are planning paths only; they have no
   native trainer yet.
 
-## Install (v2.0.2)
+## Install (v2.0.3)
 
 1. Open [Releases](https://github.com/CocoCopi/modelforge/releases) and download
-   the latest `ModelForge-2.0.2-arm64.apk` directly.
+   the latest `ModelForge-2.0.3-arm64.apk` directly.
 2. Install it on an arm64 Android 8.0+ phone, for example
-   `adb install ModelForge-2.0.2-arm64.apk`.
+   `adb install ModelForge-2.0.3-arm64.apk`.
 3. If an older development build is installed, uninstall it once. Older CI
    builds used an ephemeral debug certificate.
 4. Allow the notification permission when prompted so training controls are
    visible in the notification shade.
 
 The release APK is signed with the project's stable release key. The matching
-AAB is attached for store distribution. Updating from v2.0.0 keeps app data.
+AAB is attached for store distribution. Updating from v2.0.0 or later keeps app data.
 
 ### AI architect troubleshooting
 
-The NVIDIA model may reason silently before it emits the plan, so the first
-token can take 10-60 seconds. v2.0.2 disables hidden reasoning with
-`reasoning_effort: none`, shows elapsed time and stream-event count, and offers
-**Cancel request**. A timeout with 0 events usually means the phone cannot reach
+v2.0.3 uses `reasoning_effort: none`, shows elapsed time, stream-event count and
+the current dataset being checked/downloaded, and offers **Cancel request**. A
+timeout with 0 events usually means the phone cannot reach
 `integrate.api.nvidia.com`; try switching Wi-Fi/mobile data or VPN. A 401/403
 means the key is invalid or lacks access to the configured model; a 404 means
-that model is not enabled for the account. If the request finishes without plan
-text, retry.
+that model is not enabled for the account. If the AI suggests datasets that
+cannot be verified, they are skipped and listed; add data manually from the
+dataset step if needed.
 
 ## Using the app
 
 1. **New model** - choose a parameter target and quantization width. The
    architecture and counted parameter total update live.
-2. **Data** - search Hugging Face (optionally save a read token first), pick a
-   config, split and text columns, set rows and mix weight, then download.
-3. **Training** - adjust steps if desired and start. Training runs in the
+2. **AI design** - add an NVIDIA key and tap **Ask AI to design**. The architect
+   chooses the training recipe and real datasets, applies the settings, downloads
+   the verified text data and takes you to review. Manual dataset search is still
+   available if you want to override its choices.
+3. **Training** - review the AI-chosen settings and start. Training runs in the
    foreground service; you can leave the app and use the notification actions.
 4. **Watch** - the dashboard shows step progress, loss, best loss, tokens/second,
    RAM, ETA, battery/thermal state, a loss curve and generated samples.

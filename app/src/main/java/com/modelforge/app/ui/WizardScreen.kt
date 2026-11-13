@@ -351,7 +351,11 @@ private fun AiPlanStep(vm: ModelForgeViewModel, state: WizardState) {
             }
         }
         ForgeButton(
-            if (ai.busy) "Designing…" else "Ask AI to design",
+            when {
+                ai.busy -> "Designing…"
+                ai.plan != null -> "Redesign with AI"
+                else -> "Ask AI to design"
+            },
             onClick = vm::requestAiPlan,
             enabled = keyPresent && !ai.busy,
             modifier = Modifier.fillMaxWidth(),
@@ -363,14 +367,14 @@ private fun AiPlanStep(vm: ModelForgeViewModel, state: WizardState) {
         if (ai.busy) {
             Hairline()
             Text(
-                "Request sent · ${elapsed}s elapsed · ${ai.events} stream events",
+                "${ai.stage.ifBlank { "Contacting NVIDIA" }} · ${elapsed}s · ${ai.events} events",
                 style = ForgeType.monoSmall,
                 color = ForgeColors.verdigris
             )
             if (ai.streaming.isBlank()) {
                 Text(
-                    "Waiting for NVIDIA's first token. The model may reason silently first; " +
-                        "this usually takes 10-60 seconds.",
+                    "The AI is choosing training settings and checking real Hugging Face datasets. " +
+                        "Downloads are added to the mix automatically.",
                     style = MaterialTheme.typography.bodySmall,
                     color = ForgeColors.inkMuted
                 )
@@ -388,6 +392,9 @@ private fun AiPlanStep(vm: ModelForgeViewModel, state: WizardState) {
                 modifier = Modifier.fillMaxWidth(),
                 tint = ForgeColors.error
             )
+        }
+        if (!ai.busy && ai.stage.isNotBlank()) {
+            Text(ai.stage, style = MaterialTheme.typography.bodySmall, color = ForgeColors.verdigris)
         }
     }
     ai.plan?.let { plan ->
@@ -412,22 +419,34 @@ private fun AiPlanStep(vm: ModelForgeViewModel, state: WizardState) {
             LedgerStat("learning rate", String.format("%.1e", plan.training.learningRate))
             LedgerStat("warmup", "${plan.training.warmupSteps} steps")
             Text(
-                "Applied to this draft. You can still adjust them on the next screens.",
+                "Applied automatically. You can still adjust them on the previous screens.",
                 style = MaterialTheme.typography.bodySmall,
                 color = ForgeColors.inkMuted
             )
         }
-        SectionCard("Recommended datasets") {
+        SectionCard("Datasets chosen and downloaded by the AI") {
             if (plan.datasets.isEmpty()) {
                 Text(
-                    "The AI recommended no datasets. Search manually on the next screen.",
+                    "The AI recommended no datasets. Open the dataset step to choose one manually.",
                     style = MaterialTheme.typography.bodySmall,
                     color = ForgeColors.ochreInk
                 )
             }
             plan.datasets.forEach { suggestion ->
-                AiDatasetRow(suggestion, busy = ai.busy, onInspect = { vm.inspectAiDataset(suggestion) })
+                val status = when {
+                    suggestion.datasetId in ai.appliedDatasetIds -> "downloaded"
+                    suggestion.datasetId in ai.skippedDatasetIds -> "not used"
+                    ai.busy -> "checking"
+                    else -> "selected"
+                }
+                AiDatasetRow(suggestion, status)
             }
+            ForgeOutlineButton(
+                "Open dataset mix",
+                onClick = vm::goToDatasets,
+                enabled = !ai.busy,
+                modifier = Modifier.fillMaxWidth()
+            )
         }
         if (plan.warnings.isNotEmpty()) {
             SectionCard("Warnings") {
@@ -455,7 +474,13 @@ private fun AiPlanStep(vm: ModelForgeViewModel, state: WizardState) {
 }
 
 @Composable
-private fun AiDatasetRow(suggestion: AiDatasetSuggestion, busy: Boolean, onInspect: () -> Unit) {
+private fun AiDatasetRow(suggestion: AiDatasetSuggestion, status: String) {
+    val tint = when (status) {
+        "downloaded" -> ForgeColors.verdigris
+        "not used" -> ForgeColors.ochreInk
+        "checking" -> ForgeColors.inkMuted
+        else -> ForgeColors.verdigris
+    }
     NotebookCard {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(
@@ -463,7 +488,7 @@ private fun AiDatasetRow(suggestion: AiDatasetSuggestion, busy: Boolean, onInspe
                 style = MaterialTheme.typography.bodyMedium,
                 color = ForgeColors.verdigris
             )
-            StatusTag(suggestion.purpose, ForgeColors.verdigris)
+            StatusTag(status, tint)
         }
         Text(
             "${suggestion.rows} rows · ${String.format("%.1f", suggestion.weight)}x · " +
@@ -481,12 +506,6 @@ private fun AiDatasetRow(suggestion: AiDatasetSuggestion, busy: Boolean, onInspe
         if (suggestion.reason.isNotBlank()) {
             Text(suggestion.reason, style = MaterialTheme.typography.bodySmall, color = ForgeColors.inkMuted)
         }
-        ForgeOutlineButton(
-            "Inspect on Hugging Face",
-            onClick = onInspect,
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth()
-        )
     }
 }
 
@@ -939,6 +958,7 @@ private fun ReviewStep(vm: ModelForgeViewModel, state: WizardState) {
     val config = state.config
     val info = ArchitectureRegistry.info(state.architectureId)
     val presets by vm.presets.collectAsState()
+    val ai by vm.aiPlanner.collectAsState()
     var presetName by remember { mutableStateOf("") }
     SectionCard("Review") {
         LedgerStat("name", state.name.ifBlank { "—" })
@@ -969,9 +989,35 @@ private fun ReviewStep(vm: ModelForgeViewModel, state: WizardState) {
         if (state.toolCalling) AutoDatasetRow("Tool calls", "request → call → result")
         state.datasets.forEach { entry ->
             Text(
-                "${entry.datasetId} · ${String.format("%.1f", entry.weight)}x",
+                "${entry.datasetId} · ${String.format("%.1f", entry.weight)}x · ${entry.rows} rows",
                 style = ForgeType.monoSmall,
                 color = ForgeColors.inkMuted
+            )
+        }
+    }
+
+    if (ai.applied) {
+        SectionCard("AI autopilot") {
+            Text(
+                ai.stage.ifBlank { "The AI chose the training recipe and downloaded datasets." },
+                style = MaterialTheme.typography.bodyMedium,
+                color = ForgeColors.verdigris
+            )
+            LedgerStat("auto-downloaded", "${ai.appliedDatasetIds.size} datasets")
+            if (ai.skippedDatasetIds.isNotEmpty()) {
+                Text(
+                    "Skipped: ${ai.skippedDatasetIds.joinToString(", ")}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ForgeColors.ochreInk
+                )
+            }
+            ai.plan?.warnings?.take(3)?.forEach {
+                Text("· $it", style = MaterialTheme.typography.bodySmall, color = ForgeColors.ochreInk)
+            }
+            ForgeOutlineButton(
+                "Review AI design",
+                onClick = vm::goToAiPlan,
+                modifier = Modifier.fillMaxWidth()
             )
         }
     }

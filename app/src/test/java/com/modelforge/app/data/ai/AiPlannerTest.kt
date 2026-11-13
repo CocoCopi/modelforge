@@ -1,5 +1,7 @@
 package com.modelforge.app.data.ai
 
+import com.modelforge.app.data.hf.DatasetConfigInfo
+import com.modelforge.app.data.hf.DatasetStructure
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -36,6 +38,9 @@ class AiPlannerTest {
         assertTrue(user.contains("training_minutes: 90"))
         assertTrue(user.contains("inputs: Text"))
         assertTrue(user.contains("reasoning: true"))
+        assertTrue(system.contains("most fluent"))
+        assertTrue(system.contains("800-1600 steps"))
+        assertTrue(system.contains("do not invent ids"))
     }
 
     @Test
@@ -113,5 +118,101 @@ class NvidiaResponseTest {
         val reasoning = """{"choices":[{"delta":{"reasoning_content":"thinking"}}]}"""
         assertEquals(null, NvidiaStreamParser.delta(reasoning))
         assertEquals("thinking", NvidiaStreamParser.reasoningDelta(reasoning))
+    }
+}
+
+class AiDatasetResolverTest {
+    private fun structure() = DatasetStructure(
+        datasetId = "owner/data",
+        configs = listOf(
+            DatasetConfigInfo("empty", listOf("train"), emptyList()),
+            DatasetConfigInfo("default", listOf("train", "validation"), listOf("prompt", "response")),
+            DatasetConfigInfo("other", listOf("test"), listOf("text"))
+        )
+    )
+
+    @Test
+    fun uses_requested_config_split_and_columns_when_they_exist() {
+        val resolved = AiDatasetResolver.resolve(
+            structure(),
+            AiDatasetSuggestion(
+                datasetId = "owner/data",
+                config = "default",
+                split = "validation",
+                columns = listOf("prompt", "missing")
+            )
+        )
+        assertEquals("default", resolved?.config)
+        assertEquals("validation", resolved?.split)
+        assertEquals(listOf("prompt"), resolved?.columns)
+    }
+
+    @Test
+    fun rejects_a_hallucinated_explicit_config_instead_of_silently_using_another() {
+        val resolved = AiDatasetResolver.resolve(
+            structure(),
+            AiDatasetSuggestion(datasetId = "owner/data", config = "missing")
+        )
+        assertEquals(null, resolved)
+    }
+
+    @Test
+    fun falls_back_to_a_real_text_config_and_split_when_config_is_blank() {
+        val resolved = AiDatasetResolver.resolve(
+            structure(),
+            AiDatasetSuggestion(datasetId = "owner/data", config = "", split = "missing")
+        )
+        assertEquals("default", resolved?.config)
+        assertEquals("train", resolved?.split)
+        assertEquals(listOf("prompt", "response"), resolved?.columns)
+    }
+
+    @Test
+    fun returns_null_when_no_text_columns_exist() {
+        val onlyEmpty = DatasetStructure(
+            datasetId = "owner/data",
+            configs = listOf(DatasetConfigInfo("default", listOf("train"), emptyList()))
+        )
+        assertEquals(null, AiDatasetResolver.resolve(onlyEmpty, AiDatasetSuggestion(datasetId = "owner/data")))
+    }
+}
+
+
+class AiPlanDeduplicationTest {
+    @Test
+    fun keeps_the_same_dataset_with_different_configs() {
+        val plan = AiPlanner.sanitize(
+            AiPlan(
+                datasets = listOf(
+                    AiDatasetSuggestion(datasetId = "owner/data", config = "english", split = "train"),
+                    AiDatasetSuggestion(datasetId = "owner/data", config = "tamil", split = "train")
+                )
+            )
+        )
+        assertEquals(2, plan.datasets.size)
+    }
+}
+
+class AiDatasetColumnQualityTest {
+    @Test
+    fun prefers_content_columns_over_system_metadata() {
+        val structure = DatasetStructure(
+            datasetId = "owner/chat",
+            configs = listOf(DatasetConfigInfo("default", listOf("train"), listOf("system", "chat")))
+        )
+        val resolved = AiDatasetResolver.resolve(
+            structure,
+            AiDatasetSuggestion(datasetId = "owner/chat", config = "default")
+        )
+        assertEquals(listOf("chat"), resolved?.columns)
+    }
+
+    @Test
+    fun rejects_a_dataset_with_only_metadata_text() {
+        val structure = DatasetStructure(
+            datasetId = "owner/meta",
+            configs = listOf(DatasetConfigInfo("default", listOf("train"), listOf("system", "url")))
+        )
+        assertEquals(null, AiDatasetResolver.resolve(structure, AiDatasetSuggestion(datasetId = "owner/meta")))
     }
 }

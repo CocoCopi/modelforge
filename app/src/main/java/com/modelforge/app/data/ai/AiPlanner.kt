@@ -77,12 +77,33 @@ object AiPlanner {
         text, identity, reasoning, tool calls, each language, each modality)
         provide a dataset suggestion, but keep the whole plan compact: at most 8
         dataset suggestions total. Give rows and mix weights that fit a small
-        phone model. Use these architecture ids only:
+        phone model. Optimise for the most fluent, coherent and capable model the
+        phone can train in training_minutes; never default to the smallest
+        recipe. Prefer 3-6 complementary datasets with clean, long-form text,
+        including a strong general corpus and instruction data. These are
+        verified examples you may use when suitable:
+        general English: HuggingFaceFW/fineweb-edu config sample-10BT, split
+        train, column text; instruction: databricks/databricks-dolly-15k config
+        default, split train, columns instruction,context,response; reasoning:
+        openai/gsm8k config main, split train, columns question,answer; tool
+        calls: glaiveai/glaive-function-calling-v2 config default, split train,
+        columns system,chat; Tamil: mozhi-ai/tamil-corpus config default, split
+        train, column text, or muthuramkumar/tamil_corpus_2.3m config default,
+        split train, column text. If you are unsure about a dataset's config,
+        use one of these verified examples instead. Use these architecture ids
+        only:
         gpt_text (traditional transformer), ncm_text (NCM), ai_architecture
         (AI-designed experimental architecture). The app currently downloads
         text datasets only; for image, audio, video or documents, recommend data
         but warn that native training for it is not built yet.
-        Return the final JSON promptly. Do not narrate or add extra sections.
+        Choose training settings for quality, not speed. For models up to 10M
+        parameters prefer 800-1600 steps, batch 8-12, sequence 128-256 and a
+        learning rate of 8e-4 to 1e-3 when training_minutes allows. For 10-30M
+        use 500-1000 steps, batch 4-8 and 4e-4 to 6e-4. For larger models use
+        300-700 steps and 2e-4 to 4e-4. Use a warmup of 5-10% of steps. Dataset
+        ids must be real, public Hugging Face repositories with text columns;
+        do not invent ids. Return the final JSON promptly. Do not narrate or add
+        extra sections.
         JSON shape:
         {
           "overview": "fluent plain-language overview with an analogy",
@@ -167,8 +188,9 @@ object AiPlanner {
         val seen = HashSet<String>()
         val datasets = plan.datasets.mapNotNull { item ->
             val id = item.datasetId.trim()
-            if (id.isBlank() || !seen.add(id)) return@mapNotNull null
             val columns = item.columns.map { it.trim() }.filter { it.isNotBlank() }
+            val key = "$id|${item.config.trim()}|${item.split.trim()}"
+            if (id.isBlank() || !seen.add(key)) return@mapNotNull null
             item.copy(
                 datasetId = id,
                 purpose = item.purpose.trim().ifBlank { "general" },

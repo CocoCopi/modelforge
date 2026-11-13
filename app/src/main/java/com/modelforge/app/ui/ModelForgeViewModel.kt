@@ -25,7 +25,7 @@ import com.modelforge.app.data.TrainingLiveState
 import com.modelforge.app.data.TrainingSettings
 import com.modelforge.app.data.WizardDraft
 import com.modelforge.app.data.WizardDraftStore
-import com.modelforge.app.data.ai.AiDatasetSuggestion
+import com.modelforge.app.data.ai.AiDatasetResolver
 import com.modelforge.app.data.ai.AiPlan
 import com.modelforge.app.data.ai.AiPlanRequest
 import com.modelforge.app.data.ai.AiPlanner
@@ -43,6 +43,8 @@ import com.modelforge.app.nativebridge.NativeModel
 import com.modelforge.app.nativebridge.PackedModel
 import com.modelforge.app.training.TrainingService
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -116,6 +118,9 @@ data class AiPlannerState(
     val streaming: String = "",
     val plan: AiPlan? = null,
     val applied: Boolean = false,
+    val stage: String = "",
+    val appliedDatasetIds: Set<String> = emptySet(),
+    val skippedDatasetIds: Set<String> = emptySet(),
     val startedAt: Long = 0L,
     val events: Int = 0,
     val error: String? = null
@@ -321,6 +326,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             ).withSettings(fresh)
         }
         _notice.value = null
+        _aiPlanner.value = AiPlannerState()
         _screen.value = Screen.Wizard
     }
 
@@ -465,6 +471,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         _aiPlanner.value = AiPlannerState(
             busy = true,
             streaming = "",
+            stage = "Contacting NVIDIA",
             startedAt = System.currentTimeMillis()
         )
         aiJob = viewModelScope.launch {
@@ -474,7 +481,10 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                     AiPlanner.messages(req),
                     onDelta = { delta ->
                         _aiPlanner.update {
-                            it.copy(streaming = (it.streaming + delta).takeLast(12000))
+                            it.copy(
+                                stage = "Receiving the plan",
+                                streaming = (it.streaming + delta).takeLast(12000)
+                            )
                         }
                     },
                     onActivity = {
@@ -482,15 +492,58 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 )
                 val plan = AiPlanner.parse(raw)
-                _aiPlanner.value = AiPlannerState(plan = plan, applied = true)
+                _aiPlanner.value = AiPlannerState(
+                    busy = true,
+                    plan = plan,
+                    stage = "Applying the AI training recipe",
+                    startedAt = _aiPlanner.value.startedAt,
+                    events = _aiPlanner.value.events
+                )
                 applyAiTraining(plan.training)
+                autoApplyDatasets(plan)
+                val applied = _aiPlanner.value.appliedDatasetIds
+                val skipped = _aiPlanner.value.skippedDatasetIds
+                val datasetCount = _wizard.value.datasets.size
+                if (datasetCount > 0) {
+                    updateWizard {
+                        if (it.step == WizardStep.AI_PLAN.ordinal) {
+                            it.copy(step = WizardStep.REVIEW.ordinal, error = null)
+                        } else it.copy(error = null)
+                    }
+                    _aiPlanner.update {
+                        it.copy(
+                            busy = false,
+                            applied = true,
+                            stage = if (applied.isEmpty()) {
+                                "Applied training settings; kept the existing dataset mix."
+                            } else {
+                                "Applied training settings and downloaded ${applied.size} dataset(s)." +
+                                    if (skipped.isEmpty()) "" else " Skipped ${skipped.size} unavailable suggestion(s)."
+                            }
+                        )
+                    }
+                } else {
+                    _aiPlanner.update {
+                        it.copy(
+                            busy = false,
+                            applied = false,
+                            stage = "Training settings applied.",
+                            error = "The AI chose datasets, but none could be verified and downloaded. " +
+                                "Open the dataset step to choose one manually, or redesign."
+                        )
+                    }
+                }
             } catch (t: kotlinx.coroutines.CancellationException) {
                 throw t
             } catch (t: Throwable) {
                 if (!isActive) return@launch
-                _aiPlanner.value = AiPlannerState(
-                    error = t.message ?: "AI planning failed. Check the key and connection."
-                )
+                _aiPlanner.update {
+                    it.copy(
+                        busy = false,
+                        stage = "",
+                        error = t.message ?: "AI planning failed. Check the key and connection."
+                    )
+                }
             } finally {
                 aiJob = null
             }
@@ -534,40 +587,87 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun inspectAiDataset(suggestion: AiDatasetSuggestion) {
-        if (_aiPlanner.value.busy) return
-        _aiPlanner.update { it.copy(busy = true, error = null) }
-        viewModelScope.launch {
+    private suspend fun autoApplyDatasets(plan: AiPlan) {
+        val modelId = _wizard.value.modelId ?: return
+        val dataDir = store.dataDir(modelId)
+        val suggestions = plan.datasets.take(8)
+        for ((position, suggestion) in suggestions.withIndex()) {
+            currentCoroutineContext().ensureActive()
+            val id = suggestion.datasetId.trim()
+            if (id.isBlank()) continue
+            if (_wizard.value.datasets.any { it.datasetId == id }) {
+                _aiPlanner.update {
+                    it.copy(skippedDatasetIds = it.skippedDatasetIds + id, stage = "Already in the mix: $id")
+                }
+                continue
+            }
+            val label = "${position + 1}/${suggestions.size}"
+            _aiPlanner.update { it.copy(stage = "Checking $id ($label)") }
+            val destination = File(dataDir, "ai_${UUID.randomUUID()}.txt")
             try {
-                val detail = hf.detail(suggestion.datasetId)
-                val structure = hf.structure(suggestion.datasetId)
-                if (structure.configs.isEmpty()) throw HfException("No configs were found for ${suggestion.datasetId}.")
-                val config = structure.configs.firstOrNull { it.name == suggestion.config }
-                    ?: structure.configs.first()
-                val split = config.splits.firstOrNull { it == suggestion.split }
-                    ?: config.splits.firstOrNull()
-                    ?: throw HfException("No split was found for ${suggestion.datasetId}.")
-                val wanted = suggestion.columns.filter { it in config.textColumns }.toSet()
-                val columns = wanted.ifEmpty { config.textColumns.toSet() }
-                updateWizard {
+                val detail = hf.detail(id)
+                val structure = hf.structure(id)
+                val resolved = AiDatasetResolver.resolve(structure, suggestion)
+                    ?: throw HfException("No usable text config, split or column was found.")
+                val rows = suggestion.rows.coerceIn(100, 1500)
+                val maxBytes = (rows.toLong() * 2048L).coerceIn(256_000L, 1_500_000L)
+                _aiPlanner.update { it.copy(stage = "Downloading $id ($label)") }
+                val stats = hf.downloadText(
+                    datasetId = id,
+                    config = resolved.config,
+                    split = resolved.split,
+                    columns = resolved.columns,
+                    maxRows = rows,
+                    maxBytes = maxBytes,
+                    destination = destination
+                ) { progress ->
+                    _aiPlanner.update {
+                        it.copy(stage = "Downloading $id · ${progress.rows} rows ($label)")
+                    }
+                }
+                currentCoroutineContext().ensureActive()
+                val license = detail.resolvedLicense()
+                val entry = DatasetMixEntry(
+                    datasetId = id,
+                    config = resolved.config,
+                    split = resolved.split,
+                    columns = resolved.columns,
+                    weight = suggestion.weight.coerceIn(0.1f, 5f),
+                    cacheFile = destination.name,
+                    rows = stats.rows,
+                    bytes = stats.bytes,
+                    license = license,
+                    nonCommercial = isLikelyNonCommercial(license)
+                )
+                updateWizard { it.copy(datasets = it.datasets + entry, error = null) }
+                _aiPlanner.update {
                     it.copy(
-                        selectedDataset = detail,
-                        structure = structure,
-                        configName = config.name,
-                        splitName = split,
-                        columns = columns,
-                        rows = suggestion.rows.coerceIn(100, 5000),
-                        weight = suggestion.weight.coerceIn(0.1f, 5f),
-                        step = WizardStep.DATASETS.ordinal,
-                        error = null
+                        appliedDatasetIds = it.appliedDatasetIds + id,
+                        skippedDatasetIds = it.skippedDatasetIds - id,
+                        stage = "Downloaded $id ($label)"
                     )
                 }
-                _aiPlanner.update { it.copy(busy = false) }
-                _notice.value = "Inspected ${suggestion.datasetId}. Review the columns, then download it."
+            } catch (t: kotlinx.coroutines.CancellationException) {
+                destination.delete()
+                throw t
             } catch (t: Throwable) {
-                _aiPlanner.update { it.copy(busy = false, error = t.message ?: "Could not inspect the suggested dataset.") }
+                destination.delete()
+                _aiPlanner.update {
+                    it.copy(
+                        skippedDatasetIds = it.skippedDatasetIds + id,
+                        stage = "Skipped $id: ${t.message ?: "unavailable"}"
+                    )
+                }
             }
         }
+    }
+
+    fun goToDatasets() {
+        updateWizard { it.copy(step = WizardStep.DATASETS.ordinal) }
+    }
+
+    fun goToAiPlan() {
+        updateWizard { it.copy(step = WizardStep.AI_PLAN.ordinal) }
     }
 
     fun updateSpeedMode(mode: String) {
@@ -948,6 +1048,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         draftStore.clear()
         refreshModels()
         _wizard.value = WizardState()
+        _aiPlanner.value = AiPlannerState()
         _screen.value = Screen.Training(id)
     }
 
