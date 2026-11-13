@@ -171,7 +171,14 @@ fun DiagnosticsScreen(vm: ModelForgeViewModel) {
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    SmallCaps("RECENT LOG", "${logs.size} entries")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SmallCaps("RECENT LOG")
+                        Text(
+                            "${logs.size} entries",
+                            style = ForgeType.monoSmall,
+                            color = ForgeColors.inkMuted
+                        )
+                    }
                     ForgeOutlineButton(
                         "Clear log",
                         onClick = {
