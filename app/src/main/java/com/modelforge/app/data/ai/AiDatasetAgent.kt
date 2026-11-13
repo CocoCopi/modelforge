@@ -2,6 +2,7 @@ package com.modelforge.app.data.ai
 
 import com.modelforge.app.data.hf.AiDatasetSource
 import com.modelforge.app.data.hf.DatasetStructure
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -33,7 +34,8 @@ class AiDatasetAgent(
                 val raw = chat.streamChat(apiKey, messages, onDelta, onActivity)
                 val action = AiPlanner.parseAgentAction(raw)
                 if (action == null) {
-                    lastError = "The AI sent an unreadable tool action."
+                    lastError = "The AI sent an unreadable tool action: ${snippet(raw)}"
+                    onStage("AI sent an unreadable action; retrying")
                     messages += AiMessage("assistant", raw.take(6000))
                     messages += AiMessage("user", invalidAction)
                     continue
@@ -42,7 +44,7 @@ class AiDatasetAgent(
                     is AiAgentAction.Search -> {
                         toolCalls++
                         onStage("Searching Hugging Face for \"${action.query}\"")
-                        val results = runCatching { source.search(action.query, action.limit) }.getOrNull()
+                        val results = tryTool { source.search(action.query, action.limit) }
                         messages += AiMessage("assistant", raw.take(6000))
                         messages += AiMessage(
                             "user",
@@ -92,6 +94,26 @@ class AiDatasetAgent(
             true
         }
 
+        if (accepted == null && completed == true) {
+            onStage("Retrying with a direct plan")
+            val directRaw = try {
+                chat.streamChat(apiKey, AiPlanner.messages(request), onDelta, onActivity)
+            } catch (t: CancellationException) {
+                throw t
+            } catch (t: Throwable) {
+                lastError = "Direct plan request failed: ${t.message ?: t.javaClass.simpleName}"
+                null
+            }
+            if (directRaw != null) {
+                val directPlan = runCatching { AiPlanner.parse(directRaw) }.getOrNull()
+                if (directPlan != null) {
+                    accepted = verify(directPlan, structures)
+                } else {
+                    lastError += " Direct plan was unreadable: ${snippet(directRaw)}"
+                }
+            }
+        }
+
         return accepted ?: throw AiException(
             if (completed == null) {
                 "AI dataset research timed out. Check the connection and retry."
@@ -100,6 +122,16 @@ class AiDatasetAgent(
             }
         )
     }
+
+    private suspend fun <T> tryTool(block: suspend () -> T): T? = try {
+        block()
+    } catch (t: CancellationException) {
+        throw t
+    } catch (_: Throwable) {
+        null
+    }
+
+    private fun snippet(raw: String): String = raw.replace(Regex("\\s+"), " ").trim().take(220)
 
     private fun searchResult(query: String, results: List<com.modelforge.app.data.hf.HfDatasetSummary>?): String {
         return buildJsonObject {
@@ -127,8 +159,8 @@ class AiDatasetAgent(
         config: String?,
         structures: MutableMap<String, DatasetStructure>
     ): String {
-        val detail = runCatching { source.detail(datasetId) }.getOrNull()
-        val structure = runCatching { source.structure(datasetId) }.getOrNull()
+        val detail = tryTool { source.detail(datasetId) }
+        val structure = tryTool { source.structure(datasetId) }
         if (structure == null) {
             return buildJsonObject {
                 put("tool", "inspect")
@@ -174,7 +206,7 @@ class AiDatasetAgent(
         val datasets = plan.datasets.mapNotNull { suggestion ->
             val id = suggestion.datasetId.trim()
             if (id.isBlank()) return@mapNotNull null
-            val structure = structures[id] ?: runCatching { source.structure(id) }.getOrNull()
+            val structure = structures[id] ?: tryTool { source.structure(id) }
             if (structure == null) {
                 dropped += "$id: metadata unavailable"
                 return@mapNotNull null

@@ -5,6 +5,8 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -159,7 +161,9 @@ object AiPlanner {
     fun agentSystemPrompt(): String = """
         You are ModelForge's dataset research agent running in the background.
         You have live tools for the Hugging Face API. Reply with exactly one JSON
-        object per turn and no markdown fences or commentary.
+        object per turn and no markdown fences, XML, prose or commentary. Put the
+        action name in a top-level string field named "action". Do not return
+        multiple objects.
         Tools:
         1. Search real public datasets:
         {"action":"search","query":"keywords","limit":8}
@@ -213,38 +217,174 @@ object AiPlanner {
         val candidates = buildList {
             add(text)
             val fenced = Regex("```(?:json)?\\s*(.*?)```", RegexOption.DOT_MATCHES_ALL)
-                .find(text)?.groupValues?.getOrNull(1)?.trim()
-            if (fenced != null) add(fenced)
+                .findAll(text)
+                .mapNotNull { it.groupValues.getOrNull(1)?.trim()?.takeIf { body -> body.isNotEmpty() } }
+            addAll(fenced)
+            addAll(extractJsonValues(text))
             val first = text.indexOf('{')
             val last = text.lastIndexOf('}')
             if (first >= 0 && last > first) add(text.substring(first, last + 1))
+        }.distinct()
+        for (candidate in candidates) {
+            val element = runCatching { bareJson.parseToJsonElement(candidate) }.getOrNull() ?: continue
+            parseActionElement(element)?.let { return it }
         }
-        val obj = candidates.distinct().firstNotNullOfOrNull { candidate ->
-            runCatching { bareJson.parseToJsonElement(candidate) as? JsonObject }.getOrNull()
-        } ?: return null
-        val action = (obj["action"] as? JsonPrimitive)?.contentOrNull?.trim()?.lowercase()
-        if (action == null) {
-            val plan = decodePlan(obj) ?: return null
-            return AiAgentAction.Final(plan)
+        return null
+    }
+
+    private fun parseActionElement(element: JsonElement): AiAgentAction? {
+        val obj = when (element) {
+            is JsonObject -> element
+            is JsonArray -> element.firstNotNullOfOrNull { it as? JsonObject } ?: return null
+            else -> return null
         }
-        return when (action) {
-            "search" -> {
-                val query = (obj["query"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
-                val limit = (obj["limit"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull() ?: 8
-                if (query.isBlank()) null else AiAgentAction.Search(query, limit.coerceIn(1, 12))
+
+        val calls = obj["tool_calls"] as? JsonArray
+        if (calls != null) {
+            for (call in calls) {
+                val entry = call as? JsonObject ?: continue
+                val function = entry["function"] as? JsonObject
+                val name = (function?.get("name") ?: entry["name"])?.asString() ?: continue
+                val args = parseArgs(
+                    function?.get("arguments") ?: entry["arguments"] ?:
+                        function?.get("args") ?: entry["args"] ?: function
+                )
+                parseNamedAction(name, args)?.let { return it }
             }
-            "inspect" -> {
-                val id = (obj["dataset_id"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
-                val config = (obj["config"] as? JsonPrimitive)?.contentOrNull?.trim()
-                    ?.takeIf { it.isNotBlank() }
-                if (id.isBlank()) null else AiAgentAction.Inspect(id, config)
+        }
+
+        val topName = obj["name"]?.asString()
+        val topArgs = obj["arguments"] ?: obj["args"] ?: obj["parameters"]
+        if (topName != null && topArgs != null) {
+            parseNamedAction(topName, parseArgs(topArgs))?.let { return it }
+        }
+
+        val actionElement = obj["action"] ?: obj["tool"] ?: obj["type"]
+        val actionName = when (actionElement) {
+            is JsonPrimitive -> actionElement.contentOrNull
+            is JsonObject -> (actionElement["type"] ?: actionElement["name"] ?: actionElement["action"])?.asString()
+            else -> null
+        }
+        val actionArgs = when (actionElement) {
+            is JsonObject -> actionElement
+            else -> obj
+        }
+        if (actionName != null) {
+            parseNamedAction(actionName, actionArgs)?.let { return it }
+        }
+
+        val planElement = obj["plan"]
+        val plan = when (planElement) {
+            is JsonObject -> decodePlan(planElement)
+            is JsonPrimitive -> parseObject(planElement.contentOrNull)?.let { decodePlan(it) }
+            else -> null
+        }
+        if (plan != null) return AiAgentAction.Final(plan)
+
+        if (obj.containsKey("datasets") || obj.containsKey("training") ||
+            obj.containsKey("overview") || obj.containsKey("analogy")
+        ) {
+            decodePlan(obj)?.let { return AiAgentAction.Final(it) }
+        }
+        return null
+    }
+
+    private fun parseNamedAction(rawName: String, args: JsonObject?): AiAgentAction? {
+        val name = rawName.trim().lowercase().replace('-', '_').replace(' ', '_')
+        val data = args ?: JsonObject(emptyMap())
+        return when (name) {
+            "search", "search_datasets", "dataset_search", "find_datasets", "lookup" -> {
+                val query = stringField(data, "query", "q", "search", "term") ?: return null
+                val limit = (stringField(data, "limit", "count", "max_results")
+                    ?.toIntOrNull() ?: 8).coerceIn(1, 12)
+                AiAgentAction.Search(query, limit)
             }
-            "final" -> {
-                val plan = (obj["plan"] as? JsonObject)?.let { decodePlan(it) } ?: return null
-                AiAgentAction.Final(plan)
+            "inspect", "inspect_dataset", "dataset_info", "get_dataset", "describe_dataset" -> {
+                val id = stringField(data, "dataset_id", "datasetId", "id", "dataset", "repo_id")
+                    ?: return null
+                AiAgentAction.Inspect(id, stringField(data, "config", "config_name"))
+            }
+            "final", "finish", "final_answer", "done", "plan" -> {
+                val planElement = data["plan"]
+                val plan = when (planElement) {
+                    is JsonObject -> decodePlan(planElement)
+                    is JsonPrimitive -> parseObject(planElement.contentOrNull)?.let { decodePlan(it) }
+                    else -> null
+                } ?: decodePlan(data)
+                plan?.let { AiAgentAction.Final(it) }
             }
             else -> null
         }
+    }
+
+    private fun parseArgs(element: JsonElement?): JsonObject? = when (element) {
+        is JsonObject -> element
+        is JsonPrimitive -> parseObject(element.contentOrNull)
+        else -> null
+    }
+
+    private fun parseObject(text: String?): JsonObject? {
+        if (text.isNullOrBlank()) return null
+        val direct = runCatching { bareJson.parseToJsonElement(text) as? JsonObject }.getOrNull()
+        if (direct != null) return direct
+        return extractJsonValues(text).firstNotNullOfOrNull { candidate ->
+            runCatching { bareJson.parseToJsonElement(candidate) as? JsonObject }.getOrNull()
+        }
+    }
+
+    private fun JsonElement.asString(): String? = (this as? JsonPrimitive)?.contentOrNull?.trim()
+        ?.takeIf { it.isNotEmpty() }
+
+    private fun stringField(obj: JsonObject, vararg keys: String): String? {
+        for (key in keys) {
+            obj[key]?.asString()?.let { return it }
+        }
+        return null
+    }
+
+    private fun extractJsonValues(text: String): List<String> {
+        val out = mutableListOf<String>()
+        var index = 0
+        while (index < text.length) {
+            val open = text[index]
+            if (open != '{' && open != '[') {
+                index++
+                continue
+            }
+            var depth = 0
+            var inString = false
+            var escaped = false
+            var end = -1
+            for (cursor in index until text.length) {
+                val ch = text[cursor]
+                if (inString) {
+                    when {
+                        escaped -> escaped = false
+                        ch == '\\' -> escaped = true
+                        ch == '"' -> inString = false
+                    }
+                } else {
+                    when (ch) {
+                        '"' -> inString = true
+                        '{', '[' -> depth++
+                        '}', ']' -> {
+                            depth--
+                            if (depth == 0) {
+                                end = cursor
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+            if (end > index) {
+                out += text.substring(index, end + 1)
+                index = end + 1
+            } else {
+                index++
+            }
+        }
+        return out
     }
 
     private fun decodePlan(obj: JsonObject): AiPlan? =

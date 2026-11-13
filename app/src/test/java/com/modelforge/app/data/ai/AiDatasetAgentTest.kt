@@ -43,6 +43,22 @@ class AiDatasetAgentTest {
     }
 
     @Test
+    fun falls_back_to_a_direct_plan_when_actions_are_unreadable() {
+        val directPlan = """
+            {"overview":"Direct plan.","datasets":[{"dataset_id":"owner/data",
+             "config":"default","split":"train","columns":["text"],
+             "rows":1200,"weight":1.0,"license":"apache-2.0","commercial_use":true}]}
+        """.trimIndent()
+        val chat = ScriptedChat(mutableListOf("I cannot use tools.", directPlan))
+        val plan = kotlinx.coroutines.runBlocking {
+            AiDatasetAgent(chat, FakeSource(), maxCalls = 1).design("key", request())
+        }
+
+        assertEquals("Direct plan.", plan.overview)
+        assertEquals("owner/data", plan.datasets.single().datasetId)
+    }
+
+    @Test
     fun rejects_unverified_final_choices_and_retries() {
         val chat = ScriptedChat(
             mutableListOf(

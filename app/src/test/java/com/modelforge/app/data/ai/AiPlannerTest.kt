@@ -259,3 +259,43 @@ class AiDatasetFallbacksTest {
         )
     }
 }
+
+class AiAgentActionParserTest {
+    @Test
+    fun reads_the_first_action_after_prose_and_other_objects() {
+        val raw = """I will search first.
+            {"action":"search","query":"tamil text","limit":4}
+            Later: {"action":"inspect","dataset_id":"owner/data"}
+        """.trimIndent()
+        assertEquals(AiAgentAction.Search("tamil text", 4), AiPlanner.parseAgentAction(raw))
+    }
+
+    @Test
+    fun reads_openai_style_tool_calls() {
+        val raw = """
+            {"tool_calls":[{"function":{"name":"inspect",
+             "arguments":"{\"dataset_id\":\"owner/data\",\"config\":\"default\"}"}}]}
+        """.trimIndent()
+        assertEquals(AiAgentAction.Inspect("owner/data", "default"), AiPlanner.parseAgentAction(raw))
+    }
+
+    @Test
+    fun reads_an_action_object() {
+        val raw = """{"action":{"type":"search","query":"stories","limit":3}}"""
+        assertEquals(AiAgentAction.Search("stories", 3), AiPlanner.parseAgentAction(raw))
+    }
+
+    @Test
+    fun reads_a_direct_plan_without_an_action_wrapper() {
+        val raw = """{"overview":"x","datasets":[{"dataset_id":"owner/data","config":"default"}]}"""
+        val action = AiPlanner.parseAgentAction(raw) as AiAgentAction.Final
+        assertEquals("owner/data", action.plan.datasets.single().datasetId)
+    }
+
+    @Test
+    fun reads_a_plan_stored_as_a_json_string() {
+        val raw = """{"action":"final","plan":"{\"overview\":\"x\",\"datasets\":[]}"}"""
+        val action = AiPlanner.parseAgentAction(raw) as AiAgentAction.Final
+        assertEquals("x", action.plan.overview)
+    }
+}
