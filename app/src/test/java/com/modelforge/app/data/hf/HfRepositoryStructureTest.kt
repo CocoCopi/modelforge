@@ -21,6 +21,7 @@ class HfRepositoryStructureTest {
     private class FakePublicApi : HfApi {
         override suspend fun searchDatasets(query: String, limit: Int): List<HfDatasetSummary> = emptyList()
         override suspend fun datasetDetail(id: String): HfDatasetDetail = HfDatasetDetail()
+        override suspend fun whoAmI(): HfWhoAmI = HfWhoAmI(name = "test")
     }
 
     private inner class FakeServerApi : HfDatasetServerApi {
