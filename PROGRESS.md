@@ -509,3 +509,35 @@ Status: DONE - CI run 43289520212 green.
   `401440084462f6fae035ba286a9fd021ca32d9caae84a11a26352d0f37506e7d`
 - AAB SHA-256:
   `76201563ccf754d47fea5dd55d1221bd4680871f47ae9f62f971bd43f1bc9527`
+
+## Production release v2.0.3 - AI autopilot downloads datasets
+
+Status: DONE - CI run 43360697894 green.
+
+- The AI architect now applies its chosen training recipe automatically:
+  steps, batch size, sequence length, learning rate and warmup are written to
+  the model draft before the user reaches Review.
+- Up to 8 AI-selected Hugging Face datasets are resolved, downloaded and added
+  to the dataset mix automatically. Existing datasets are retained on redesign.
+- `AiDatasetResolver` now rejects explicitly requested configs that do not
+  exist, uses real splits, prefers instruction/response/text columns, and
+  rejects datasets with no usable text columns.
+- Dataset dedupe now normalizes blank config/split to `default`/`train`, so
+  repeated suggestions collapse while the same id with different real configs
+  is preserved.
+- Hugging Face page downloads retry transient `429/5xx` and I/O failures before
+  reporting a dataset as skipped. The integration test uses Dolly-15k because
+  the TinyStories viewer returned repeated 503s.
+- Added AI stage/elapsed/event progress, per-dataset status, an auto-download
+  flow that opens Review when ready, and a Review "AI autopilot" summary card.
+- Version `2.0.3` (`versionCode 5`), signed with the stable key so it updates
+  over 2.0.0-2.0.2. Release:
+  https://github.com/CocoCopi/modelforge/releases/tag/v2.0.3
+- APK SHA-256:
+  `f96914f8b683627bc49f1d37a7af2ce6251005fc8684a5efc75e06f8cd0b929d`
+- AAB SHA-256:
+  `e4a747a6bf9ebf74a710f7575b460c0240cf2c33b80e2fb028e8c9cb67b56f52`
+
+Limitations: native training remains text-to-text only; NCM and AI-designed
+architectures remain planning paths. AI output quality still depends on the
+NVIDIA model and the datasets it selects.
