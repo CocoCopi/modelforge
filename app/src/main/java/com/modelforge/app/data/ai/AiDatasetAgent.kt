@@ -26,7 +26,6 @@ class AiDatasetAgent(
         val structures = mutableMapOf<String, DatasetStructure>()
         var accepted: AiPlan? = null
         var lastError = "The AI did not finish a verified dataset plan."
-        var toolCalls = 0
 
         val completed = withTimeoutOrNull(totalTimeoutMs) {
             for (call in 0 until maxCalls) {
@@ -42,7 +41,6 @@ class AiDatasetAgent(
                 }
                 when (action) {
                     is AiAgentAction.Search -> {
-                        toolCalls++
                         onStage("Searching Hugging Face for \"${action.query}\"")
                         val results = tryTool { source.search(action.query, action.limit) }
                         messages += AiMessage("assistant", raw.take(6000))
@@ -52,7 +50,6 @@ class AiDatasetAgent(
                         )
                     }
                     is AiAgentAction.Inspect -> {
-                        toolCalls++
                         onStage("Inspecting ${action.datasetId}")
                         messages += AiMessage("assistant", raw.take(6000))
                         messages += AiMessage(
@@ -61,16 +58,6 @@ class AiDatasetAgent(
                         )
                     }
                     is AiAgentAction.Final -> {
-                        if (action.plan.datasets.isNotEmpty() && toolCalls == 0) {
-                            lastError = "The AI tried to finalize without using a dataset tool."
-                            messages += AiMessage("assistant", raw.take(6000))
-                            messages += AiMessage(
-                                "user",
-                                "You must use search or inspect before finalizing a dataset plan. " +
-                                    "Use a tool now, then return the final action."
-                            )
-                            continue
-                        }
                         onStage("Verifying the AI's dataset choices")
                         val plan = verify(action.plan, structures)
                         if (plan.datasets.isEmpty() && action.plan.datasets.isNotEmpty()) {
