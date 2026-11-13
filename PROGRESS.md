@@ -541,3 +541,29 @@ Status: DONE - CI run 43360697894 green.
 Limitations: native training remains text-to-text only; NCM and AI-designed
 architectures remain planning paths. AI output quality still depends on the
 NVIDIA model and the datasets it selects.
+
+## Production release v2.0.4 - recover when AI datasets fail
+
+Status: DONE - CI run 43367803126 green.
+
+- Reported issue: the AI chose datasets, but none were verified or downloaded,
+  leaving only a generic error and a manual-dataset fallback.
+- Added `AiDatasetFallbacks` with verified starter datasets for Tamil,
+  tool-calling, reasoning, instruction and general English. When every AI
+  suggestion fails, up to two fallback datasets are downloaded automatically.
+- Skip reasons are now stored in `AiPlannerState.skippedDatasetReasons` and
+  shown per dataset in the AI design screen and Review. The final error includes
+  the underlying HTTP/network reasons.
+- Empty AI plans also try the verified fallbacks instead of stopping.
+- `HfRepository.structure` now falls through to `/splits` plus sample rows when
+  `/info` returns configs without text features, and checks all splits instead
+  of only the first. Added `HfRepositoryStructureTest`.
+- Added `AiDatasetFallbacksTest` for Tamil/tool/reasoning ordering and the
+  general two-dataset fallback.
+- Version `2.0.4` (`versionCode 6`), signed with the stable key so it updates
+  over 2.0.0-2.0.3. Release:
+  https://github.com/CocoCopi/modelforge/releases/tag/v2.0.4
+- APK SHA-256:
+  `cce105aa7487b4d0931081620244e2e875806d62d2a6feeb635523fd6b328539`
+- AAB SHA-256:
+  `6bf18323669a8456953426c0c90ac22a0b1a6a34fedd10fd5fc17ec0e8d0ddd4`
