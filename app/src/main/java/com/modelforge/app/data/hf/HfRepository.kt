@@ -12,9 +12,15 @@ import retrofit2.HttpException
 import java.io.File
 import java.io.IOException
 
-class HfRepository(private val bundle: HfApiBundle = HfClient.create()) {
+interface AiDatasetSource {
+    suspend fun search(query: String, limit: Int = 30): List<HfDatasetSummary>
+    suspend fun detail(id: String): HfDatasetSummary
+    suspend fun structure(datasetId: String): DatasetStructure
+}
 
-    suspend fun search(query: String, limit: Int = 30): List<HfDatasetSummary> {
+class HfRepository(private val bundle: HfApiBundle = HfClient.create()) : AiDatasetSource {
+
+    override suspend fun search(query: String, limit: Int): List<HfDatasetSummary> {
         return try {
             bundle.publicApi.searchDatasets(query, limit)
         } catch (t: Throwable) {
@@ -22,7 +28,7 @@ class HfRepository(private val bundle: HfApiBundle = HfClient.create()) {
         }
     }
 
-    suspend fun detail(id: String): HfDatasetSummary {
+    override suspend fun detail(id: String): HfDatasetSummary {
         return try {
             val d = bundle.publicApi.datasetDetail(id)
             HfDatasetSummary(
@@ -38,7 +44,7 @@ class HfRepository(private val bundle: HfApiBundle = HfClient.create()) {
         }
     }
 
-    suspend fun structure(datasetId: String): DatasetStructure {
+    override suspend fun structure(datasetId: String): DatasetStructure {
         try {
             val info = bundle.serverApi.info(datasetId)
             if (info.dataset_info.isNotEmpty()) {

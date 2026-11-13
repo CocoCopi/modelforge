@@ -21,6 +21,15 @@ data class AiMessage(val role: String, val content: String)
 
 class AiException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
+interface AiChat {
+    suspend fun streamChat(
+        apiKey: String,
+        messages: List<AiMessage>,
+        onDelta: (String) -> Unit = {},
+        onActivity: () -> Unit = {}
+    ): String
+}
+
 object NvidiaStreamParser {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
@@ -63,7 +72,7 @@ class NvidiaClient(
         .writeTimeout(30, TimeUnit.SECONDS)
         .callTimeout(300, TimeUnit.SECONDS)
         .build()
-) {
+) : AiChat {
     @Volatile
     private var activeCall: Call? = null
 
@@ -71,11 +80,11 @@ class NvidiaClient(
         activeCall?.cancel()
     }
 
-    suspend fun streamChat(
+    override suspend fun streamChat(
         apiKey: String,
         messages: List<AiMessage>,
-        onDelta: (String) -> Unit = {},
-        onActivity: () -> Unit = {}
+        onDelta: (String) -> Unit,
+        onActivity: () -> Unit
     ): String = withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) throw AiException("No NVIDIA API key saved.")
         val payload = buildJsonObject {

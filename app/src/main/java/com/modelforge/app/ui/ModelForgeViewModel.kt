@@ -25,12 +25,12 @@ import com.modelforge.app.data.TrainingLiveState
 import com.modelforge.app.data.TrainingSettings
 import com.modelforge.app.data.WizardDraft
 import com.modelforge.app.data.WizardDraftStore
+import com.modelforge.app.data.ai.AiDatasetAgent
 import com.modelforge.app.data.ai.AiDatasetFallbacks
 import com.modelforge.app.data.ai.AiDatasetResolver
 import com.modelforge.app.data.ai.AiDatasetSuggestion
 import com.modelforge.app.data.ai.AiPlan
 import com.modelforge.app.data.ai.AiPlanRequest
-import com.modelforge.app.data.ai.AiPlanner
 import com.modelforge.app.data.ai.AiTrainingPlan
 import com.modelforge.app.data.ai.NvidiaClient
 import com.modelforge.app.data.hf.DatasetStructure
@@ -183,6 +183,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     private val tokenStore = SecureTokenStore(app)
     private val hf = HfRepository(HfClient.create { tokenStore.token })
     private val nvidia = NvidiaClient()
+    private val agent = AiDatasetAgent(nvidia, hf)
     private var aiJob: kotlinx.coroutines.Job? = null
 
     val hardware = HardwareDetector.detect(app)
@@ -479,22 +480,21 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         )
         aiJob = viewModelScope.launch {
             try {
-                val raw = nvidia.streamChat(
+                val plan = agent.design(
                     key,
-                    AiPlanner.messages(req),
+                    req,
+                    onStage = { stage ->
+                        _aiPlanner.update { it.copy(stage = stage) }
+                    },
                     onDelta = { delta ->
                         _aiPlanner.update {
-                            it.copy(
-                                stage = "Receiving the plan",
-                                streaming = (it.streaming + delta).takeLast(12000)
-                            )
+                            it.copy(streaming = (it.streaming + delta).takeLast(12000))
                         }
                     },
                     onActivity = {
                         _aiPlanner.update { it.copy(events = it.events + 1) }
                     }
                 )
-                val plan = AiPlanner.parse(raw)
                 _aiPlanner.value = AiPlannerState(
                     busy = true,
                     plan = plan,

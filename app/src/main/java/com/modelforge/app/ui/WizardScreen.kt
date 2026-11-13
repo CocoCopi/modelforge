@@ -373,8 +373,8 @@ private fun AiPlanStep(vm: ModelForgeViewModel, state: WizardState) {
             )
             if (ai.streaming.isBlank()) {
                 Text(
-                    "The AI is choosing training settings and checking real Hugging Face datasets. " +
-                        "Downloads are added to the mix automatically.",
+                    "The AI searches and inspects real Hugging Face datasets with live API tools, " +
+                        "then downloads verified text data into the mix automatically.",
                     style = MaterialTheme.typography.bodySmall,
                     color = ForgeColors.inkMuted
                 )

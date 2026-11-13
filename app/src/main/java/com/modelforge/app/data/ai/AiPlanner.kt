@@ -5,6 +5,9 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 @Serializable
 data class AiDatasetSuggestion(
@@ -38,6 +41,12 @@ data class AiPlan(
     val notes: List<String> = emptyList(),
     val warnings: List<String> = emptyList()
 )
+
+sealed class AiAgentAction {
+    data class Search(val query: String, val limit: Int) : AiAgentAction()
+    data class Inspect(val datasetId: String, val config: String?) : AiAgentAction()
+    data class Final(val plan: AiPlan) : AiAgentAction()
+}
 
 data class AiPlanRequest(
     val name: String,
@@ -146,6 +155,100 @@ object AiPlanner {
         AiMessage("system", systemPrompt()),
         AiMessage("user", userPrompt(request))
     )
+
+    fun agentSystemPrompt(): String = """
+        You are ModelForge's dataset research agent running in the background.
+        You have live tools for the Hugging Face API. Reply with exactly one JSON
+        object per turn and no markdown fences or commentary.
+        Tools:
+        1. Search real public datasets:
+        {"action":"search","query":"keywords","limit":8}
+        2. Inspect a dataset before using it:
+        {"action":"inspect","dataset_id":"owner/name","config":"optional"}
+        3. Finish only after verification:
+        {"action":"final","plan":{...}}
+        Rules:
+        - Never invent dataset ids, configs, splits or columns. Use tool results.
+        - Use search when you need candidates. Inspect every dataset you intend to
+          use and copy its real config, split and text columns into the final plan.
+        - If a requested config is missing, pick a real config from the inspection
+          or search for another dataset. Do not guess.
+        - If every inspected option is unusable, search again instead of repeating
+          the same suggestion.
+        - Prefer permissive, commercial-use datasets. If the licence is unknown or
+          non-commercial, set commercial_use false and warn about it.
+        - Choose 3-6 complementary datasets and quality-focused training settings.
+        - Keep the final plan compact. The JSON plan shape is:
+        {
+          "overview": "plain-language overview with an analogy",
+          "analogy": "one short analogy",
+          "training": {"steps": 800, "batch_size": 10, "seq_length": 128,
+                       "learning_rate": 0.0009, "warmup_steps": 80},
+          "datasets": [
+            {"purpose": "general|identity|reasoning|tool_calls|language",
+             "dataset_id": "owner/name", "config": "real-config",
+             "split": "real-split", "columns": ["real", "columns"],
+             "rows": 1200, "weight": 1.0, "license": "real-license",
+             "commercial_use": true, "reason": "why this data fits"}
+          ],
+          "notes": ["short design notes"],
+          "warnings": ["honest limitations"]
+        }
+        ${systemPrompt()}
+    """.trimIndent()
+
+    fun agentMessages(request: AiPlanRequest): List<AiMessage> = listOf(
+        AiMessage("system", agentSystemPrompt()),
+        AiMessage(
+            "user",
+            userPrompt(request) + "\nUse the search and inspect tools. Do not finalize " +
+                "until every dataset in the plan has been verified by a tool result. " +
+                "Then return the final action."
+        )
+    )
+
+    fun parseAgentAction(raw: String): AiAgentAction? {
+        val text = raw.trim()
+        if (text.isEmpty()) return null
+        val candidates = buildList {
+            add(text)
+            val fenced = Regex("```(?:json)?\\s*(.*?)```", RegexOption.DOT_MATCHES_ALL)
+                .find(text)?.groupValues?.getOrNull(1)?.trim()
+            if (fenced != null) add(fenced)
+            val first = text.indexOf('{')
+            val last = text.lastIndexOf('}')
+            if (first >= 0 && last > first) add(text.substring(first, last + 1))
+        }
+        val obj = candidates.distinct().firstNotNullOfOrNull { candidate ->
+            runCatching { bareJson.parseToJsonElement(candidate) as? JsonObject }.getOrNull()
+        } ?: return null
+        val action = (obj["action"] as? JsonPrimitive)?.contentOrNull?.trim()?.lowercase()
+        if (action == null) {
+            val plan = decodePlan(obj) ?: return null
+            return AiAgentAction.Final(plan)
+        }
+        return when (action) {
+            "search" -> {
+                val query = (obj["query"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+                val limit = (obj["limit"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull() ?: 8
+                if (query.isBlank()) null else AiAgentAction.Search(query, limit.coerceIn(1, 12))
+            }
+            "inspect" -> {
+                val id = (obj["dataset_id"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+                val config = (obj["config"] as? JsonPrimitive)?.contentOrNull?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                if (id.isBlank()) null else AiAgentAction.Inspect(id, config)
+            }
+            "final" -> {
+                val plan = (obj["plan"] as? JsonObject)?.let { decodePlan(it) } ?: return null
+                AiAgentAction.Final(plan)
+            }
+            else -> null
+        }
+    }
+
+    private fun decodePlan(obj: JsonObject): AiPlan? =
+        runCatching { bareJson.decodeFromString<AiPlan>(obj.toString()) }.getOrNull()
 
     fun parse(raw: String): AiPlan {
         val text = raw.trim()
