@@ -1,6 +1,9 @@
 package com.modelforge.app.data.hf
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -66,6 +69,28 @@ class HfRepository(
         }
     }
 
+    /**
+     * Returns the exact number of rows for a split. The datasets-server info
+     * endpoint is preferred; if it has no size metadata, one lightweight rows
+     * request supplies num_rows_total.
+     */
+    suspend fun rowCount(datasetId: String, config: String, split: String): Long? {
+        val known = structure(datasetId).configs
+            .firstOrNull { it.name == config }
+            ?.splitRows?.get(split)
+            ?.takeIf { it > 0L }
+        if (known != null) return known
+        return try {
+            val page = retryTransient {
+                bundle.serverApi.rows(datasetId, config, split, 0, 1)
+            }
+            page.num_rows_total.takeIf { it > 0L }
+        } catch (t: Throwable) {
+            if (isRateLimited(t)) throw HfException(describeNetworkError(t), t)
+            null
+        }
+    }
+
     override suspend fun structure(datasetId: String): DatasetStructure {
         cached(structureCache, datasetId)?.let { return it }
         try {
@@ -75,7 +100,8 @@ class HfRepository(
                     DatasetConfigInfo(
                         name = name,
                         splits = entry.splits.keys.sorted(),
-                        textColumns = textColumns(entry.features)
+                        textColumns = textColumns(entry.features),
+                        splitRows = entry.splits.mapValues { it.value.num_examples }
                     )
                 }
                 if (configs.any { it.textColumns.isNotEmpty() }) {
@@ -99,7 +125,8 @@ class HfRepository(
                 DatasetConfigInfo(
                     config,
                     splitNames,
-                    textColumnsFromRows(datasetId, config, splitNames)
+                    textColumnsFromRows(datasetId, config, splitNames),
+                    emptyMap()
                 )
             }
             val structure = DatasetStructure(datasetId, configs)
@@ -152,6 +179,7 @@ class HfRepository(
         maxBytes: Long,
         destination: File,
         pageSize: Int = 100,
+        concurrency: Int = 6,
         onProgress: (DownloadStats) -> Unit = {}
     ): DownloadStats = withContext(Dispatchers.IO) {
         destination.parentFile?.mkdirs()
@@ -160,50 +188,81 @@ class HfRepository(
         var writtenBytes = 0L
         val preview = StringBuilder()
         var totalRows = Long.MAX_VALUE
+        val workers = concurrency.coerceIn(1, 12)
+        val pageRows = pageSize.coerceIn(1, 100)
 
         destination.bufferedWriter(Charsets.UTF_8).use { writer ->
             while (writtenRows < maxRows && writtenBytes < maxBytes && offset < totalRows) {
                 currentCoroutineContext().ensureActive()
-                val page = try {
-                    retryTransient {
-                        bundle.serverApi.rows(
-                            datasetId,
-                            config,
-                            split,
-                            offset,
-                            minOf(pageSize, maxRows - writtenRows)
-                        )
+                val stopOffset = minOf(totalRows, maxRows.toLong())
+                val offsets = (0 until workers)
+                    .map { offset + it.toLong() * pageRows }
+                    .filter { it < stopOffset }
+                if (offsets.isEmpty()) break
+                val pages = try {
+                    coroutineScope {
+                        offsets.map { pageOffset ->
+                            val length = minOf(
+                                pageRows.toLong(),
+                                stopOffset - pageOffset
+                            ).toInt().coerceAtLeast(1)
+                            async {
+                                pageOffset to retryTransient {
+                                    bundle.serverApi.rows(
+                                        datasetId,
+                                        config,
+                                        split,
+                                        pageOffset,
+                                        length
+                                    )
+                                }
+                            }
+                        }.awaitAll()
                     }
                 } catch (t: Throwable) {
                     throw HfException(describeNetworkError(t), t)
                 }
-                if (page.rows.isEmpty()) break
-                totalRows = if (page.num_rows_total > 0) page.num_rows_total else totalRows
-                offset += page.rows.size
 
-                val pageColumns = if (columns.isNotEmpty()) columns else page.features
-                    .filter { isTextFeature(it) }
-                    .map { it.name }
-
-                for (entry in page.rows) {
-                    val parts = pageColumns.mapNotNull { col ->
-                        (entry.row[col] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+                var consumed = 0L
+                var reachedEnd = false
+                for ((pageOffset, page) in pages) {
+                    if (pageOffset != offset + consumed) break
+                    if (page.rows.isEmpty()) {
+                        reachedEnd = true
+                        break
                     }
-                    if (parts.isEmpty()) continue
-                    val line = parts.joinToString("\n")
-                    val bytes = line.toByteArray(Charsets.UTF_8).size + 1
-                    if (writtenBytes + bytes > maxBytes && writtenRows > 0) break
-                    writer.write(line)
-                    writer.newLine()
-                    writtenRows++
-                    writtenBytes += bytes
-                    if (preview.length < 4096) preview.append(line.take(4096 - preview.length)).append('\n')
-                    if (writtenRows >= maxRows) break
+                    if (page.num_rows_total > 0) totalRows = page.num_rows_total
+                    val pageColumns = if (columns.isNotEmpty()) columns else page.features
+                        .filter { isTextFeature(it) }
+                        .map { it.name }
+                    for (entry in page.rows) {
+                        val parts = pageColumns.mapNotNull { col ->
+                            (entry.row[col] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+                        }
+                        if (parts.isEmpty()) continue
+                        val line = parts.joinToString("\n")
+                        val bytes = line.toByteArray(Charsets.UTF_8).size + 1
+                        if (writtenBytes + bytes > maxBytes && writtenRows > 0) {
+                            reachedEnd = true
+                            break
+                        }
+                        writer.write(line)
+                        writer.newLine()
+                        writtenRows++
+                        writtenBytes += bytes
+                        if (preview.length < 4096) preview.append(line.take(4096 - preview.length)).append('\n')
+                        if (writtenRows >= maxRows) {
+                            reachedEnd = true
+                            break
+                        }
+                    }
+                    consumed += page.rows.size
+                    if (reachedEnd) break
                 }
-
+                offset += consumed
                 val stats = DownloadStats(writtenRows, writtenBytes, preview.toString())
                 onProgress(stats)
-                delay(200L)
+                if (reachedEnd || consumed == 0L || offset >= totalRows) break
             }
         }
 

@@ -66,11 +66,11 @@ class AiPlannerTest {
         """.trimIndent()
         val plan = AiPlanner.parse(raw)
         assertEquals("A tiny kite model.", plan.overview)
-        assertEquals(2000, plan.training.steps)
+        assertEquals(9000, plan.training.steps)
         assertEquals(32, plan.training.batchSize)
         assertEquals(32, plan.training.seqLength)
         assertEquals(1, plan.datasets.size)
-        assertEquals(5000, plan.datasets.first().rows)
+        assertEquals(99999, plan.datasets.first().rows)
         assertEquals(5f, plan.datasets.first().weight, 1e-6f)
     }
 

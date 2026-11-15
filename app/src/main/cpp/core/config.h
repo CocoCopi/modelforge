@@ -25,11 +25,12 @@ struct ModelConfig {
         const int64_t d = d_model;
         const int64_t df = d_ff;
         const int64_t v = vocab;
-        const int64_t c = context;
         const int64_t l = layers;
         const int64_t per_layer = 4 * d * d + 2 * d * df + 9 * d + df;
         const int64_t head = tied_embeddings ? 0 : v * d;
-        return v * d + c * d + l * per_layer + 2 * d + head;
+        // Positions are fixed sinusoidal values, so the context length adds no
+        // trainable parameters and no context-sized position table.
+        return v * d + l * per_layer + 2 * d + head;
     }
 
     int64_t linear_weight_count() const {

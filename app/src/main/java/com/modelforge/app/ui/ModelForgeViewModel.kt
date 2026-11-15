@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Intent
 import android.net.Uri
 import android.os.PowerManager
+import android.os.StatFs
 import android.provider.Settings
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -106,6 +107,8 @@ data class WizardState(
     val splitName: String = "",
     val columns: Set<String> = emptySet(),
     val rows: Int = 1000,
+    val availableRows: Long = 0L,
+    val rowCountBusy: Boolean = false,
     val weight: Float = 1f,
     val datasetBusy: Boolean = false,
     val datasetProgress: DownloadStats? = null,
@@ -379,7 +382,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         val draft = draftStore.load()
         val target = draft?.targetParams ?: defaultTarget()
         val architectureId = draft?.architectureId ?: ArchitectureRegistry.GPT_TEXT
-        val context = draft?.contextLength?.takeIf { it > 0 }
+        val context = draft?.contextLength?.takeIf { it > 0 }?.coerceIn(128, 1_000_000)
         val config = ArchitectureRegistry.derive(
             architectureId,
             target,
@@ -396,7 +399,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 inputModalities = (draft.inputModalities.ifEmpty { listOf(Modality.TEXT) }).toSet(),
                 outputModalities = (draft.outputModalities.ifEmpty { listOf(Modality.TEXT) }).toSet(),
                 trainingMinutes = draft.trainingMinutes.coerceIn(15, 480),
-                contextChoice = draft.contextLength,
+                contextChoice = context ?: 0,
                 languages = draft.languages.toSet(),
                 speedMode = draft.speedMode,
                 reasoningEnabled = draft.reasoningEnabled,
@@ -404,8 +407,8 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 toolCalling = draft.toolCalling,
                 persona = draft.persona,
                 bits = draft.bits,
-                steps = draft.steps,
-                batchSize = draft.batchSize,
+                steps = draft.steps.coerceAtLeast(1),
+                batchSize = draft.batchSize.coerceIn(1, 32),
                 seqLength = draft.seqLength,
                 learningRate = draft.learningRate,
                 warmupSteps = draft.warmupSteps,
@@ -481,15 +484,15 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
 
     fun updateContext(length: Int) {
         val state = _wizard.value
-        if (length <= 0) return
+        val bounded = length.coerceIn(128, 1_000_000)
         val config = ArchitectureRegistry.derive(
             state.architectureId,
             state.targetParams,
             maxTargetParams,
-            length
+            bounded
         ).config
         updateWizard {
-            it.copy(contextChoice = length, config = config ?: it.config, error = null)
+            it.copy(contextChoice = bounded, config = config ?: it.config, error = null)
         }
     }
 
@@ -728,7 +731,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             val seq = training.seqLength.coerceAtMost(
                 state.contextChoice.takeIf { it > 0 } ?: state.config?.contextLength ?: training.seqLength
             )
-            val steps = training.steps.coerceIn(100, 2000)
+            val steps = training.steps.coerceAtLeast(1)
             state.copy(
                 steps = steps,
                 batchSize = training.batchSize.coerceIn(1, 32),
@@ -738,7 +741,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 checkpointEvery = maxOf(20, steps / 10),
                 sampleEvery = maxOf(20, steps / 5),
                 corpusChars = (steps.toLong() * training.batchSize * seq * 3L)
-                    .coerceIn(200_000L, 2_000_000L)
+                    .coerceIn(200_000L, 4_000_000L)
                     .toInt(),
                 error = null
             )
@@ -750,7 +753,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         val dataDir = store.dataDir(modelId)
         val before = _wizard.value.datasets.size
         aiRateLimited = false
-        val suggestions = plan.datasets.take(6)
+        val suggestions = plan.datasets
         for ((position, suggestion) in suggestions.withIndex()) {
             tryApplyDataset(suggestion, "${position + 1}/${suggestions.size}", dataDir)
             if (aiRateLimited) return
@@ -799,8 +802,8 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             val structure = hf.structure(id)
             val resolved = AiDatasetResolver.resolve(structure, suggestion)
                 ?: throw HfException("No usable text config, split or column was found.")
-            val rows = suggestion.rows.coerceIn(100, 1000)
-            val maxBytes = (rows.toLong() * 2048L).coerceIn(256_000L, 1_500_000L)
+            val rows = suggestion.rows.coerceAtLeast(1)
+            val maxBytes = minOf(rows.toLong() * 2048L, freeDownloadBytes(modelId))
             _aiPlanner.update { it.copy(stage = "Downloading $id ($label)") }
             val stats = hf.downloadText(
                 datasetId = id,
@@ -893,7 +896,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun updateSteps(value: Int) {
-        val steps = value.coerceIn(100, 2000)
+        val steps = value.coerceAtLeast(1)
         updateWizard {
             it.copy(
                 steps = steps,
@@ -901,7 +904,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 checkpointEvery = maxOf(20, steps / 10),
                 sampleEvery = maxOf(20, steps / 5),
                 corpusChars = (steps.toLong() * it.batchSize * it.seqLength * 3L)
-                    .coerceIn(200_000L, 2_000_000L)
+                    .coerceIn(200_000L, 4_000_000L)
                     .toInt()
             )
         }
@@ -944,11 +947,13 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             _notice.value = info.unavailableReason ?: "That architecture is not available."
             return
         }
+        val presetContext = preset.contextLength.takeIf { it > 0 }
+            ?.coerceIn(128, 1_000_000)
         val derive = ArchitectureRegistry.derive(
             preset.architectureId,
             preset.targetParams.coerceIn(1_000_000L, maxTargetParams),
             maxTargetParams,
-            preset.contextLength.takeIf { it > 0 }
+            presetContext
         )
         val config = derive.config
         if (config == null) {
@@ -959,7 +964,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 architectureId = preset.architectureId,
                 targetParams = preset.targetParams,
-                contextChoice = preset.contextLength,
+                contextChoice = presetContext ?: 0,
                 languages = preset.languages.toSet(),
                 speedMode = preset.speedMode,
                 reasoningEnabled = preset.reasoningEnabled,
@@ -967,9 +972,9 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 toolCalling = preset.toolCalling,
                 persona = preset.persona,
                 bits = if (preset.bits in info.supportedBits) preset.bits else info.supportedBits.firstOrNull() ?: 4,
-                steps = preset.steps,
-                batchSize = preset.batchSize,
-                seqLength = preset.seqLength,
+                steps = preset.steps.coerceAtLeast(1),
+                batchSize = preset.batchSize.coerceIn(1, 32),
+                seqLength = preset.seqLength.coerceAtLeast(32),
                 learningRate = preset.learningRate,
                 warmupSteps = preset.warmupSteps,
                 checkpointEvery = preset.checkpointEvery,
@@ -1050,6 +1055,8 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 configName = "",
                 splitName = "",
                 columns = emptySet(),
+                availableRows = 0L,
+                rowCountBusy = false,
                 datasetBusy = true,
                 datasetProgress = null,
                 error = null
@@ -1059,22 +1066,75 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val structure = hf.structure(summary.id)
                 val first = structure.configs.firstOrNull()
+                val firstSplit = first?.splits?.firstOrNull().orEmpty()
+                val firstRows = first?.splitRows?.get(firstSplit) ?: 0L
                 updateWizard {
                     it.copy(
                         structure = structure,
                         configName = first?.name.orEmpty(),
-                        splitName = first?.splits?.firstOrNull().orEmpty(),
+                        splitName = firstSplit,
                         columns = first?.textColumns?.toSet() ?: emptySet(),
+                        availableRows = firstRows,
+                        rowCountBusy = first != null && firstRows <= 0L,
                         datasetBusy = false,
                         error = if (structure.configs.isEmpty()) {
                             "No configs were found for ${summary.id}."
                         } else null
                     )
                 }
+                if (first != null && firstRows <= 0L) refreshRowCount()
             } catch (t: Throwable) {
                 updateWizard {
-                    it.copy(datasetBusy = false, error = t.message ?: "Could not inspect this dataset.")
+                    it.copy(
+                        availableRows = 0L,
+                        rowCountBusy = false,
+                        datasetBusy = false,
+                        error = t.message ?: "Could not inspect this dataset."
+                    )
                 }
+            }
+        }
+    }
+
+    private fun refreshRowCount() {
+        val state = _wizard.value
+        val summary = state.selectedDataset ?: return
+        val config = state.configName
+        val split = state.splitName
+        if (config.isBlank() || split.isBlank()) return
+        val known = state.structure?.configs
+            ?.firstOrNull { it.name == config }
+            ?.splitRows?.get(split)
+            ?.takeIf { it > 0L }
+        if (known != null) {
+            updateWizard {
+                if (it.selectedDataset?.id == summary.id &&
+                    it.configName == config && it.splitName == split
+                ) {
+                    it.copy(availableRows = known, rowCountBusy = false)
+                } else it
+            }
+            return
+        }
+        updateWizard { it.copy(availableRows = 0L, rowCountBusy = true) }
+        viewModelScope.launch {
+            val total = try {
+                hf.rowCount(summary.id, config, split)
+            } catch (t: kotlinx.coroutines.CancellationException) {
+                throw t
+            } catch (t: Throwable) {
+                ForgeLog.warn("dataset", "Could not read split size for ${summary.id}", t)
+                null
+            }
+            updateWizard {
+                if (it.selectedDataset?.id == summary.id &&
+                    it.configName == config && it.splitName == split
+                ) {
+                    it.copy(
+                        availableRows = total ?: 0L,
+                        rowCountBusy = false
+                    )
+                } else it
             }
         }
     }
@@ -1082,16 +1142,26 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     fun selectConfig(name: String) {
         updateWizard { state ->
             val cfg = state.structure?.configs?.firstOrNull { it.name == name }
+            val firstSplit = cfg?.splits?.firstOrNull().orEmpty()
             state.copy(
                 configName = name,
-                splitName = cfg?.splits?.firstOrNull().orEmpty(),
-                columns = cfg?.textColumns?.toSet() ?: emptySet()
+                splitName = firstSplit,
+                columns = cfg?.textColumns?.toSet() ?: emptySet(),
+                availableRows = cfg?.splitRows?.get(firstSplit) ?: 0L
             )
         }
+        refreshRowCount()
     }
 
     fun selectSplit(name: String) {
-        updateWizard { it.copy(splitName = name) }
+        updateWizard { state ->
+            val known = state.structure?.configs
+                ?.firstOrNull { it.name == state.configName }
+                ?.splitRows?.get(name)
+                ?: 0L
+            it.copy(splitName = name, availableRows = known)
+        }
+        refreshRowCount()
     }
 
     fun toggleColumn(name: String) {
@@ -1102,7 +1172,16 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun updateRows(value: Int) {
-        updateWizard { it.copy(rows = value.coerceIn(100, 5000)) }
+        updateWizard { it.copy(rows = value.coerceAtLeast(1), error = null) }
+    }
+
+    fun useEntireSplit() {
+        val total = _wizard.value.availableRows
+        if (total <= 0L) {
+            updateWizard { it.copy(error = "The split row count is still unknown. Try again in a moment.") }
+            return
+        }
+        updateRows(total.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
     }
 
     fun updateWeight(value: Float) {
@@ -1130,7 +1209,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                     split = state.splitName,
                     columns = state.columns.toList(),
                     maxRows = state.rows,
-                    maxBytes = (state.rows.toLong() * 4096L).coerceAtLeast(1_000_000L),
+                    maxBytes = freeDownloadBytes(modelId),
                     destination = destination
                 ) { progress ->
                     updateWizard { it.copy(datasetProgress = progress) }
@@ -1156,6 +1235,8 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                         configName = "",
                         splitName = "",
                         columns = emptySet(),
+                        availableRows = 0L,
+                        rowCountBusy = false,
                         datasetBusy = false,
                         datasetProgress = null,
                         error = null
@@ -1635,6 +1716,15 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearNotice() {
         _notice.value = null
+    }
+
+    private fun freeDownloadBytes(modelId: String): Long {
+        return try {
+            val stat = StatFs(store.modelDir(modelId).path)
+            (stat.availableBytes - 64L * 1024L * 1024L).coerceAtLeast(1_000_000L)
+        } catch (_: Throwable) {
+            Long.MAX_VALUE / 4L
+        }
     }
 
     private fun defaultTarget(): Long {

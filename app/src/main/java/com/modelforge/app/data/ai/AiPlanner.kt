@@ -422,7 +422,7 @@ object AiPlanner {
 
     fun sanitize(plan: AiPlan): AiPlan {
         val training = plan.training.copy(
-            steps = plan.training.steps.coerceIn(100, 2000),
+            steps = plan.training.steps.coerceAtLeast(1),
             batchSize = plan.training.batchSize.coerceIn(1, 32),
             seqLength = plan.training.seqLength.coerceIn(32, 1024),
             learningRate = plan.training.learningRate.coerceIn(1e-5f, 1e-2f),
@@ -442,7 +442,7 @@ object AiPlanner {
                 config = config,
                 split = split,
                 columns = columns,
-                rows = item.rows.coerceIn(100, 5000),
+                rows = item.rows.coerceAtLeast(1),
                 weight = item.weight.coerceIn(0.1f, 5f),
                 license = item.license?.trim()?.takeIf { it.isNotBlank() },
                 reason = item.reason.trim()

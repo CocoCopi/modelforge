@@ -182,7 +182,7 @@ private:
     void init_params();
 
     ModelConfig cfg_;
-    Param wte_, wpe_, lnf_g_, lnf_b_;
+    Param wte_, lnf_g_, lnf_b_;
     std::vector<Layer> layers_;
     int qat_bits_ = 0;
     int qat_group_ = 32;
@@ -242,7 +242,7 @@ private:
     ModelConfig cfg_;
     int bits_ = 0;
     int group_ = 32;
-    Tensor wte_, wpe_, lnf_g_, lnf_b_;
+    Tensor wte_, lnf_g_, lnf_b_;
     std::vector<PackedLayer> layers_;
     mutable ForwardCache cache_;
 };

@@ -51,12 +51,15 @@ object ConfigDeriver {
                                 targetParams = cappedTarget
                             )
                             val count = cfg.paramCount()
-                            if (count > options.maxParams) continue
                             val err = abs(count - cappedTarget).toDouble() / cappedTarget.toDouble()
+                            // Keep the closest candidate even when it exceeds the budget
+                            // so the wizard can warn instead of crashing when no
+                            // configuration fits the device.
                             if (err < closestErr) {
                                 closestErr = err
                                 closest = Candidate(cfg, count, err)
                             }
+                            if (count > options.maxParams) continue
                             if (err > 0.045) continue
                             val score = aestheticPenalty(vocab, context, d, layers, heads, headDim) + err * 0.5
                             if (score < bestScore) {
@@ -79,6 +82,11 @@ object ConfigDeriver {
             append("vocab=${chosen.cfg.vocabSize}")
             if (cappedTarget < targetParams) {
                 append(". Target capped by device limit to ${formatCount(cappedTarget)} parameters.")
+            }
+            if (chosen.count > options.maxParams) {
+                append(". This configuration needs ${formatCount(chosen.count)} parameters, above the ")
+                append("${formatCount(options.maxParams)}-parameter training budget. Reduce the target ")
+                append("size if memory runs out.")
             }
         }
         return Result(chosen.cfg, chosen.err, within, explanation)

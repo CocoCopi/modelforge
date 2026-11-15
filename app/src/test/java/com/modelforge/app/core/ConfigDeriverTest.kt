@@ -44,6 +44,34 @@ class ConfigDeriverTest {
     }
 
     @Test
+    fun derivesMillionTokenContextWithoutCrashing() {
+        val result = ArchitectureRegistry.derive(
+            ArchitectureRegistry.GPT_TEXT,
+            targetParams = 5_000_000L,
+            maxParams = 50_000_000L,
+            contextLength = 1_000_000
+        )
+        val cfg = result.config
+        assertTrue("a config must still be produced", cfg != null)
+        assertEquals(1_000_000, cfg!!.contextLength)
+        assertTrue(cfg.paramCount() > 0L)
+        assertTrue(result.withinTolerance)
+    }
+
+    @Test
+    fun longContextDoesNotInflateParameterCount() {
+        val result = ConfigDeriver.derive(
+            5_000_000L,
+            ConfigDeriver.Options(
+                maxParams = 50_000_000L,
+                contextCandidates = intArrayOf(1_000_000)
+            )
+        )
+        assertEquals(1_000_000, result.config.contextLength)
+        assertTrue(result.config.paramCount() <= 5_250_000L)
+    }
+
+    @Test
     fun parameterCountFormulaIsStable() {
         val cfg = ModelConfig(
             vocabSize = 1024,
@@ -53,9 +81,23 @@ class ConfigDeriverTest {
             heads = 4,
             dFf = 256
         )
-        // V*d + C*d + L*(4d^2 + 2*d*df + 9d + df) + 2d
-        val expected = 1024L * 64 + 128L * 64 + 2L * (4L * 64 * 64 + 2L * 64 * 256 + 9L * 64 + 256) + 2L * 64
+        // V*d + L*(4d^2 + 2*d*df + 9d + df) + 2d
+        val expected = 1024L * 64 + 2L * (4L * 64 * 64 + 2L * 64 * 256 + 9L * 64 + 256) + 2L * 64
         assertEquals(expected, cfg.paramCount())
+    }
+
+    @Test
+    fun contextLengthDoesNotChangeTheParameterCount() {
+        val base = ModelConfig(
+            vocabSize = 4096,
+            contextLength = 128,
+            dModel = 256,
+            layers = 6,
+            heads = 8,
+            dFf = 1024
+        )
+        assertEquals(base.paramCount(), base.copy(contextLength = 1_000_000).paramCount())
+        assertEquals(base.fp32Bytes(), base.copy(contextLength = 1_000_000).fp32Bytes())
     }
 
     @Test

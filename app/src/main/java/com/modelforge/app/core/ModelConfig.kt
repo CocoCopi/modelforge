@@ -33,11 +33,12 @@ data class ModelConfig(
         val d = dModel.toLong()
         val df = dFf.toLong()
         val v = vocabSize.toLong()
-        val c = contextLength.toLong()
         val l = layers.toLong()
         val perLayer = 4L * d * d + 2L * d * df + 9L * d + df
         val head = if (tiedEmbeddings) 0L else v * d
-        return v * d + c * d + l * perLayer + 2L * d + head
+        // Positions are fixed sinusoidal values, so context length adds no
+        // trainable parameters and no context-sized position table.
+        return v * d + l * perLayer + 2L * d + head
     }
 
     fun linearWeightCount(): Long {

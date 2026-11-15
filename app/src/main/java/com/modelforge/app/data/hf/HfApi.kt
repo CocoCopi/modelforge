@@ -2,6 +2,7 @@ package com.modelforge.app.data.hf
 
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import kotlinx.serialization.json.Json
+import okhttp3.Dispatcher
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -73,7 +74,14 @@ object HfClient {
     }
 
     fun create(tokenProvider: () -> String? = { null }): HfApiBundle {
+        // Dataset downloads run several page requests in parallel, so allow more
+        // than OkHttp's default five connections per host.
+        val dispatcher = Dispatcher().apply {
+            maxRequests = 32
+            maxRequestsPerHost = 16
+        }
         val client = OkHttpClient.Builder()
+            .dispatcher(dispatcher)
             .addInterceptor(AuthInterceptor(tokenProvider))
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)

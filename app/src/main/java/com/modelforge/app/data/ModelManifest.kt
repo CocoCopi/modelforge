@@ -64,7 +64,7 @@ data class TrainingSettings(
                 checkpointEvery = maxOf(20, steps / 10),
                 sampleEvery = maxOf(20, steps / 5),
                 corpusChars = (steps.toLong() * batch * seq * 3L)
-                    .coerceIn(200_000L, 2_000_000L)
+                    .coerceIn(200_000L, 4_000_000L)
                     .toInt()
             )
         }

@@ -24,6 +24,18 @@ constexpr float kLnEps = 1e-5f;
 constexpr float kGeluC = 0.7978845608028654f;  // sqrt(2/pi)
 constexpr float kGeluK = 0.044715f;
 
+// Fixed sinusoidal positions. Unlike a learned table this costs no parameters
+// and no context-sized allocation, so long contexts only pay for activations.
+inline void add_positional(int pos, int d, float* x) {
+    for (int p = 0; 2 * p < d; ++p) {
+        const double freq = std::pow(10000.0, -2.0 * static_cast<double>(p) /
+                                                  static_cast<double>(d));
+        const double angle = static_cast<double>(pos) * freq;
+        x[2 * p] += static_cast<float>(std::sin(angle));
+        if (2 * p + 1 < d) x[2 * p + 1] += static_cast<float>(std::cos(angle));
+    }
+}
+
 int hardware_threads() {
     static int cached = [] {
         int hc = static_cast<int>(std::thread::hardware_concurrency());
@@ -495,13 +507,10 @@ bool GPT::init(const ModelConfig& cfg, uint64_t seed) {
     std::normal_distribution<float> normal(0.0f, 0.02f);
 
     wte_.init(cfg_.vocab, cfg_.d_model);
-    wpe_.init(cfg_.context, cfg_.d_model);
     lnf_g_.init(1, cfg_.d_model, false);
     lnf_b_.init(1, cfg_.d_model, false);
 
-    for (auto* p : {&wte_, &wpe_}) {
-        for (auto& x : p->w) x = normal(rng);
-    }
+    for (auto& x : wte_.w) x = normal(rng);
     std::fill(lnf_g_.w.begin(), lnf_g_.w.end(), 1.0f);
 
     const float residual_std = 0.02f / std::sqrt(2.0f * static_cast<float>(cfg_.layers));
@@ -543,7 +552,7 @@ bool GPT::init(const ModelConfig& cfg, uint64_t seed) {
 }
 
 std::vector<Param*> GPT::params() {
-    std::vector<Param*> out = {&wte_, &wpe_, &lnf_g_, &lnf_b_};
+    std::vector<Param*> out = {&wte_, &lnf_g_, &lnf_b_};
     for (auto& l : layers_) {
         out.push_back(&l.ln1.gamma);
         out.push_back(&l.ln1.beta);
@@ -613,7 +622,6 @@ void GPT::forward_logits(const int* tokens, int B, int T) {
     const int d = cfg_.d_model;
     const int V = cfg_.vocab;
     const int n = B * T;
-    const int H = cfg_.heads;
     const int df = cfg_.d_ff;
 
     for (auto* lin : linears()) {
@@ -632,9 +640,9 @@ void GPT::forward_logits(const int* tokens, int B, int T) {
         const int tok = tokens[i];
         const int pos = i % T;
         const float* te = wte_.row(tok);
-        const float* pe = wpe_.row(pos);
         float* xr = cur.row(i);
-        for (int j = 0; j < d; ++j) xr[j] = te[j] + pe[j];
+        for (int j = 0; j < d; ++j) xr[j] = te[j];
+        add_positional(pos, d, xr);
     }
     cache_.x0 = cur;
 
@@ -782,14 +790,9 @@ void GPT::backward() {
     // Embedding gradients (weight tying: wte also received the head gradient).
     for (int i = 0; i < n; ++i) {
         const int tok = cache_.tokens[i];
-        const int pos = i % T;
         const float* dc = dcur.row(i);
         float* gte = wte_.g.data() + static_cast<size_t>(tok) * d;
-        float* gpe = wpe_.g.data() + static_cast<size_t>(pos) * d;
-        for (int j = 0; j < d; ++j) {
-            gte[j] += dc[j];
-            gpe[j] += dc[j];
-        }
+        for (int j = 0; j < d; ++j) gte[j] += dc[j];
     }
 }
 
@@ -928,6 +931,23 @@ bool write_param(FILE* f, const Param& p, bool with_optimizer) {
     return true;
 }
 
+bool skip_floats(FILE* f, size_t count) {
+    if (count == 0) return true;
+    return std::fseek(f, static_cast<long>(count * sizeof(float)), SEEK_CUR) == 0;
+}
+
+// Reads a parameter header and skips its payload. Used to load legacy
+// checkpoints written before positions became fixed sinusoidal values.
+bool skip_param(FILE* f, int32_t expect_rows, int32_t expect_cols, bool file_has_optimizer) {
+    int32_t rows = 0;
+    int32_t cols = 0;
+    if (std::fread(&rows, sizeof(rows), 1, f) != 1) return false;
+    if (std::fread(&cols, sizeof(cols), 1, f) != 1) return false;
+    if (rows != expect_rows || cols != expect_cols) return false;
+    const size_t count = static_cast<size_t>(rows) * static_cast<size_t>(cols);
+    return skip_floats(f, count * (file_has_optimizer ? 3u : 1u));
+}
+
 bool read_param(FILE* f, Param& p, bool file_has_optimizer, bool load_optimizer) {
     int32_t rows = 0;
     int32_t cols = 0;
@@ -968,7 +988,7 @@ bool GPT::save_checkpoint(const std::string& path, bool with_optimizer) const {
     if (!f) return false;
 
     int32_t magic = 0x4D46434B;  // "MFCK"
-    int32_t version = 1;
+    int32_t version = 2;         // v2 uses fixed sinusoidal positions
     int32_t vocab = cfg_.vocab;
     int32_t context = cfg_.context;
     int32_t d_model = cfg_.d_model;
@@ -999,7 +1019,6 @@ bool GPT::save_checkpoint(const std::string& path, bool with_optimizer) const {
     ok &= std::fwrite(&param_count, sizeof(param_count), 1, f) == 1;
 
     ok &= write_param(f, wte_, with_optimizer);
-    ok &= write_param(f, wpe_, with_optimizer);
     ok &= write_param(f, lnf_g_, with_optimizer);
     ok &= write_param(f, lnf_b_, with_optimizer);
     for (const auto& l : layers_) {
@@ -1058,7 +1077,7 @@ bool GPT::load_checkpoint(const std::string& path, bool with_optimizer) {
     ok &= std::fread(&qat_group, sizeof(qat_group), 1, f) == 1;
     ok &= std::fread(&param_count, sizeof(param_count), 1, f) == 1;
 
-    if (!ok || magic != 0x4D46434B || version != 1) {
+    if (!ok || magic != 0x4D46434B || (version != 1 && version != 2)) {
         std::fclose(f);
         return false;
     }
@@ -1071,7 +1090,9 @@ bool GPT::load_checkpoint(const std::string& path, bool with_optimizer) {
     cfg.heads = heads;
     cfg.d_ff = d_ff;
     cfg.tied_embeddings = tied != 0;
-    if (!cfg.valid() || cfg.param_count() != param_count) {
+    const int64_t legacy_positions =
+        version == 1 ? static_cast<int64_t>(context) * d_model : 0;
+    if (!cfg.valid() || cfg.param_count() + legacy_positions != param_count) {
         std::fclose(f);
         return false;
     }
@@ -1083,7 +1104,9 @@ bool GPT::load_checkpoint(const std::string& path, bool with_optimizer) {
     const bool file_has_opt = has_opt != 0;
     const bool load_opt = with_optimizer && file_has_opt;
     ok &= read_param(f, wte_, file_has_opt, load_opt);
-    ok &= read_param(f, wpe_, file_has_opt, load_opt);
+    if (version == 1) {
+        ok &= skip_param(f, context, d_model, file_has_opt);
+    }
     ok &= read_param(f, lnf_g_, file_has_opt, load_opt);
     ok &= read_param(f, lnf_b_, file_has_opt, load_opt);
     for (auto& l : layers_) {
@@ -1115,7 +1138,7 @@ bool GPT::load_checkpoint(const std::string& path, bool with_optimizer) {
 namespace {
 
 constexpr int32_t kPackedMagic = 0x4D46504B;  // "MFPK"
-constexpr int32_t kPackedVersion = 1;
+constexpr int32_t kPackedVersion = 2;  // v2 omits the learned position table
 
 bool packed_bits_ok(int bits) {
     return bits == 2 || bits == 3 || bits == 4 || bits == 8;
@@ -1284,7 +1307,6 @@ bool GPT::save_packed(const std::string& path, int bits, int group) const {
     ok &= std::fwrite(&scale_count, sizeof(scale_count), 1, f) == 1;
 
     ok &= write_floats(f, wte_.data(), wte_.w.size());
-    ok &= write_floats(f, wpe_.data(), wpe_.w.size());
     ok &= write_floats(f, lnf_g_.data(), lnf_g_.w.size());
     ok &= write_floats(f, lnf_b_.data(), lnf_b_.w.size());
 
@@ -1349,8 +1371,12 @@ bool PackedModel::load(const std::string& path) {
     cfg.heads = heads;
     cfg.d_ff = d_ff;
     cfg.tied_embeddings = tied != 0;
-    if (!ok || magic != kPackedMagic || version != kPackedVersion ||
-        !cfg.valid() || cfg.param_count() != param_count ||
+    const bool legacy_positions = version == 1;
+    const int64_t expected_params = cfg.param_count() +
+        (legacy_positions ? static_cast<int64_t>(context) * d_model : 0);
+    if (!ok || magic != kPackedMagic ||
+        (version != 1 && version != kPackedVersion) ||
+        !cfg.valid() || expected_params != param_count ||
         !packed_bits_ok(bits) || group <= 0) {
         std::fclose(f);
         return false;
@@ -1363,11 +1389,12 @@ bool PackedModel::load(const std::string& path) {
     layers_.resize(static_cast<size_t>(cfg.layers));
 
     wte_.init(cfg.vocab, cfg.d_model);
-    wpe_.init(cfg.context, cfg.d_model);
     lnf_g_.init(1, cfg.d_model);
     lnf_b_.init(1, cfg.d_model);
     ok &= read_floats(f, wte_.data(), wte_.size());
-    ok &= read_floats(f, wpe_.data(), wpe_.size());
+    if (legacy_positions) {
+        ok &= skip_floats(f, static_cast<size_t>(cfg.context) * cfg.d_model);
+    }
     ok &= read_floats(f, lnf_g_.data(), lnf_g_.size());
     ok &= read_floats(f, lnf_b_.data(), lnf_b_.size());
 
@@ -1423,7 +1450,6 @@ void PackedModel::forward(const int* tokens, int B, int T) const {
     const int d = cfg_.d_model;
     const int V = cfg_.vocab;
     const int n = B * T;
-    const int df = cfg_.d_ff;
 
     cache_.B = B;
     cache_.T = T;
@@ -1435,9 +1461,9 @@ void PackedModel::forward(const int* tokens, int B, int T) const {
         const int tok = tokens[i];
         const int pos = i % T;
         const float* te = wte_.row(tok);
-        const float* pe = wpe_.row(pos);
         float* xr = cur.row(i);
-        for (int j = 0; j < d; ++j) xr[j] = te[j] + pe[j];
+        for (int j = 0; j < d; ++j) xr[j] = te[j];
+        add_positional(pos, d, xr);
     }
     cache_.x0 = cur;
 

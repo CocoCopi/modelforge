@@ -121,7 +121,8 @@ data class RowEntry(
 data class DatasetConfigInfo(
     val name: String,
     val splits: List<String>,
-    val textColumns: List<String>
+    val textColumns: List<String>,
+    val splitRows: Map<String, Long> = emptyMap()
 )
 
 data class DatasetStructure(

@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -28,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.modelforge.app.core.ArchitectureRegistry
 import com.modelforge.app.core.ArchitectureStatus
@@ -50,6 +52,10 @@ import com.modelforge.app.ui.design.StatusTag
 import com.modelforge.app.ui.design.WizardRuler
 import com.modelforge.app.ui.theme.ForgeColors
 import com.modelforge.app.ui.theme.ForgeType
+import java.util.Locale
+import kotlin.math.exp
+import kotlin.math.ln
+import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 
 private val languageChoices = listOf(
@@ -183,6 +189,14 @@ private fun SizeStep(vm: ModelForgeViewModel, state: WizardState) {
                 style = MaterialTheme.typography.bodySmall,
                 color = ForgeColors.inkMuted
             )
+            if (config.paramCount() > vm.maxTargetParams) {
+                Text(
+                    "This configuration is above the suggested training budget. ModelForge still " +
+                        "allows it; training may be slow or run out of memory.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ForgeColors.ochreInk
+                )
+            }
         }
     }
 }
@@ -293,7 +307,6 @@ private fun TrainingTimeStep(vm: ModelForgeViewModel, state: WizardState) {
         }
         NotebookCard {
             LedgerStat("time available", formatMinutes(state.trainingMinutes))
-            LedgerStat("current steps", state.steps.toString())
             Slider(
                 value = state.trainingMinutes.toFloat(),
                 onValueChange = { vm.updateTrainingMinutes(it.toInt()) },
@@ -301,12 +314,48 @@ private fun TrainingTimeStep(vm: ModelForgeViewModel, state: WizardState) {
                 steps = 30
             )
             Text(
-                "The AI architect turns this time budget into steps, batch size and mix weights. " +
-                    "Actual speed depends on this phone and is measured only after training starts.",
+                "The time budget is a planning estimate. Actual speed depends on this phone and is " +
+                    "measured only after training starts.",
                 style = MaterialTheme.typography.bodySmall,
                 color = ForgeColors.inkMuted
             )
         }
+        Hairline()
+        SmallCaps("TRAINING STEPS")
+        var stepsText by remember { mutableStateOf(state.steps.toString()) }
+        LaunchedEffect(state.steps) {
+            if (stepsText.toIntOrNull() != state.steps) stepsText = state.steps.toString()
+        }
+        OutlinedTextField(
+            value = stepsText,
+            onValueChange = { raw ->
+                val digits = raw.filter { it.isDigit() }.take(9)
+                stepsText = digits
+                digits.toIntOrNull()?.let(vm::updateSteps)
+            },
+            label = { Text("Exact optimizer steps") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            modifier = Modifier.fillMaxWidth()
+        )
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            listOf(100, 500, 1_000, 5_000, 10_000, 50_000).forEach { steps ->
+                Choice(
+                    text = formatRows(steps.toLong()),
+                    selected = state.steps == steps,
+                    onClick = { vm.updateSteps(steps) }
+                )
+            }
+        }
+        Text(
+            "Training runs exactly the number of steps you enter. More steps can improve a small " +
+                "model, but each one costs time and battery; pause and resume from Home whenever you need.",
+            style = MaterialTheme.typography.bodySmall,
+            color = ForgeColors.inkMuted
+        )
     }
 }
 
@@ -562,26 +611,53 @@ private fun LanguagesStep(vm: ModelForgeViewModel, state: WizardState) {
 
 @Composable
 private fun ContextStep(vm: ModelForgeViewModel, state: WizardState) {
-    val options = listOf(128, 256, 512, 1024)
+    val current = (state.contextChoice.takeIf { it > 0 } ?: state.config?.contextLength ?: 128)
+        .coerceIn(128, MAX_CONTEXT)
+    val options = listOf(128, 512, 2_048, 8_192, 32_768, 131_072, MAX_CONTEXT)
+    val minLog = ln(128.0)
+    val maxLog = ln(MAX_CONTEXT.toDouble())
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
             options.forEach { length ->
                 Choice(
-                    text = "$length",
-                    selected = (state.contextChoice.takeIf { it > 0 } ?: state.config?.contextLength) == length,
-                    onClick = { vm.updateContext(length) },
-                    modifier = Modifier.weight(1f)
+                    text = formatContext(length),
+                    selected = current == length,
+                    onClick = { vm.updateContext(length) }
                 )
             }
         }
         NotebookCard {
-            val context = state.contextChoice.takeIf { it > 0 } ?: state.config?.contextLength ?: 0
-            LedgerStat("tokens at once", context.toString())
-            LedgerStat("attention cost", "grows with context² during training")
+            LedgerStat("context capacity", "${formatRows(current.toLong())} tokens")
+            Slider(
+                value = ln(current.toDouble()).toFloat(),
+                onValueChange = {
+                    val length = exp(it.toDouble()).roundToInt().coerceIn(128, MAX_CONTEXT)
+                    if (length != current) vm.updateContext(length)
+                },
+                valueRange = minLog.toFloat()..maxLog.toFloat()
+            )
             Text(
-                "Longer context is not automatically better for a tiny model. 128-256 tokens is a sensible start for short text.",
+                "Slide from 128 to 1,000,000 tokens. The scale is logarithmic, so each equal " +
+                    "movement multiplies the capacity instead of adding a fixed number.",
                 style = MaterialTheme.typography.bodySmall,
                 color = ForgeColors.inkMuted
+            )
+            Hairline()
+            LedgerStat("positions", "fixed sinusoidal · no table")
+            LedgerStat(
+                "training tokens at once",
+                formatRows(minOf(current, state.seqLength).toLong())
+            )
+            Text(
+                "Context is the model's maximum positional capacity. Training still uses the " +
+                    "sequence length chosen for this device. A 1,000,000-token capacity is a " +
+                    "ceiling: actual inference length is limited by phone memory and time because " +
+                    "full attention cost grows with tokens².",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (current > 32_768) ForgeColors.ochreInk else ForgeColors.inkMuted
             )
         }
     }
@@ -912,13 +988,63 @@ private fun SelectedDatasetCard(
                 }
             }
 
-            LedgerStat("rows", state.rows.toString())
-            Slider(
-                value = state.rows.toFloat(),
-                onValueChange = { vm.updateRows(it.toInt()) },
-                valueRange = 100f..5000f,
-                steps = 48
+            SmallCaps("ROWS TO DOWNLOAD")
+            var rowsText by remember(
+                state.selectedDataset?.id,
+                state.configName,
+                state.splitName
+            ) { mutableStateOf(state.rows.toString()) }
+            LaunchedEffect(state.rows) {
+                if (rowsText.toIntOrNull() != state.rows) rowsText = state.rows.toString()
+            }
+            OutlinedTextField(
+                value = rowsText,
+                onValueChange = { raw ->
+                    val digits = raw.filter { it.isDigit() }.take(10)
+                    rowsText = digits
+                    digits.toIntOrNull()?.let(vm::updateRows)
+                },
+                label = { Text("Exact row count") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth()
             )
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(1_000, 10_000, 100_000, 1_000_000).forEach { rows ->
+                    Choice(
+                        text = ConfigDeriver.formatCount(rows.toLong()),
+                        selected = state.rows == rows,
+                        onClick = { vm.updateRows(rows) }
+                    )
+                }
+                Choice(
+                    text = if (state.rowCountBusy) "counting…" else "Entire split",
+                    selected = state.availableRows > 0L && state.rows.toLong() >= state.availableRows,
+                    onClick = vm::useEntireSplit
+                )
+            }
+            when {
+                state.rowCountBusy -> Text(
+                    "Reading the exact split size from Hugging Face…",
+                    style = ForgeType.monoSmall,
+                    color = ForgeColors.inkMuted
+                )
+                state.availableRows > 0L -> Text(
+                    "${formatRows(state.availableRows)} rows are available in this split. " +
+                        "Downloads stop at your row count or when free storage runs out.",
+                    style = ForgeType.monoSmall,
+                    color = ForgeColors.inkMuted
+                )
+                else -> Text(
+                    "The split size is unknown, so ModelForge will keep paging until the dataset ends " +
+                        "or the free-space guard is reached.",
+                    style = ForgeType.monoSmall,
+                    color = ForgeColors.inkMuted
+                )
+            }
             LedgerStat("mix weight", String.format("%.1fx", state.weight))
             Slider(
                 value = state.weight,
@@ -1241,7 +1367,17 @@ private fun advanceBlockedReason(state: WizardState): String? {
     }
 }
 
+private const val MAX_CONTEXT = 1_000_000
+
 private fun formatCount(value: Long): String = ConfigDeriver.formatCount(value)
+
+private fun formatRows(value: Long): String = String.format(Locale.US, "%,d", value)
+
+private fun formatContext(tokens: Int): String = when {
+    tokens >= 1_000_000 -> "${tokens / 1_000_000}M"
+    tokens >= 1_000 -> "${tokens / 1_000}K"
+    else -> tokens.toString()
+}
 
 private fun formatMinutes(minutes: Int): String =
     if (minutes < 60) "$minutes min" else "${minutes / 60} h ${minutes % 60} min".replace(" 0 min", "")
