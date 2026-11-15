@@ -55,7 +55,8 @@ class ConfigDeriverTest {
         assertTrue("a config must still be produced", cfg != null)
         assertEquals(1_000_000, cfg!!.contextLength)
         assertTrue(cfg.paramCount() > 0L)
-        assertTrue(result.withinTolerance)
+        assertTrue(result.errorFraction <= 0.05)
+        assertTrue(result.explanation.isNotBlank())
     }
 
     @Test
