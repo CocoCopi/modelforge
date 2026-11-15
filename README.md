@@ -9,7 +9,7 @@ quantization-aware training, writes checkpoints, and exports packed 2/3/4/8-bit
 models. The playground generates text from either the full-precision checkpoint
 or a packed export and can share the packed file.
 
-Status: v2.0.9 production build. The repository builds and tests on GitHub
+Status: v2.1.0 production build. The repository builds and tests on GitHub
 Actions and publishes a signed release APK/AAB. See
 [Honest limitations](#honest-limitations) before relying on model quality.
 
@@ -25,8 +25,17 @@ Actions and publishes a signed release APK/AAB. See
   auto-resume, boot resume, and atomic checkpoints. `last.mfck` keeps AdamW
   state for exact resume; `best.mfck` is weights-only for export.
 - **Hugging Face datasets** - search, config/split/text-column discovery,
-  license warnings, row/byte progress, weighted mixing, tokenizer training and a
-  token-id cache.
+  exact split sizes, license warnings, row/byte progress, weighted mixing,
+  tokenizer training and a token-id cache. The row field has no 5,000-row cap:
+  enter any count or use **Entire split**. Downloads fetch six 100-row pages in
+  parallel with no artificial page delay and stop at the split end or the
+  free-space guard.
+- **Up to 1,000,000-token context** - a logarithmic slider spans 128 to 1M
+  tokens with quick presets. Positions use fixed sinusoidal values, so context
+  length adds no parameters and no context-sized position table.
+- **User-set training steps** - enter an exact optimizer step count, choose a
+  preset, or let the AI architect propose one. Steps are no longer clamped to a
+  100-2,000 range.
 - **Quantization-aware training (QAT)** - symmetric per-group 32 fake
   quantization with straight-through estimation on linear layers only.
 - **Packed deployment format** - `MFPK` file with fp32 embeddings/norms/biases/
@@ -42,9 +51,9 @@ Actions and publishes a signed release APK/AAB. See
   training recipe and downloads verified datasets into the mix automatically.
   Unavailable or invented dataset configs are rejected with a visible reason; if
   every AI suggestion fails, the app tries a small list of verified starter
-  datasets. Dataset metadata is cached and requested with pacing, rate limits are
-  retried with backoff, and a **Retry dataset downloads** action resumes without
-  re-running the AI. NVIDIA `429`/`5xx` responses are also retried automatically.
+  datasets. Dataset metadata is cached, row pages are fetched in parallel and
+  rate limits are retried with backoff, and a **Retry dataset downloads** action
+  resumes without re-running the AI. NVIDIA `429`/`5xx` responses are also retried automatically.
   The NVIDIA key is encrypted on device and never logged. Tool replies are parsed
   tolerantly, and a direct plan is retried if the model ignores the tool protocol.
 - **Three architecture paths** - traditional transformer (trainable), NCM
@@ -74,13 +83,19 @@ Actions and publishes a signed release APK/AAB. See
   tests.
 - NCM and the AI-designed architecture are planning paths only; they have no
   native trainer yet.
+- 1,000,000 tokens is a positional-capacity ceiling. Training still uses the
+  sequence length chosen for the device (usually 128-256 tokens), and full
+  attention costs O(tokens²), so practical inference on a phone is far shorter.
+- Checkpoints and packed files written by older versions still load. Learned
+  position tables from those files are ignored in favour of the new sinusoidal
+  positions.
 
-## Install (v2.0.9)
+## Install (v2.1.0)
 
 1. Open [Releases](https://github.com/CocoCopi/modelforge/releases) and download
-   the latest `ModelForge-2.0.9-arm64.apk` directly.
+   the latest `ModelForge-2.1.0-arm64.apk` directly.
 2. Install it on an arm64 Android 8.0+ phone, for example
-   `adb install ModelForge-2.0.9-arm64.apk`.
+   `adb install ModelForge-2.1.0-arm64.apk`.
 3. If an older development build is installed, uninstall it once. Older CI
    builds used an ephemeral debug certificate.
 4. Allow the notification permission when prompted so training controls are
@@ -91,7 +106,7 @@ AAB is attached for store distribution. Updating from v2.0.0 or later keeps app 
 
 ### AI architect troubleshooting
 
-v2.0.9 uses `reasoning_effort: none`, shows elapsed time, stream-event count and
+v2.1.0 uses `reasoning_effort: none`, shows elapsed time, stream-event count and
 the current dataset being checked/downloaded, and offers **Cancel request**. A
 timeout with 0 events usually means the phone cannot reach
 `integrate.api.nvidia.com`; try switching Wi-Fi/mobile data or VPN. A 401/403
@@ -102,17 +117,17 @@ suggestion fails, the app retries with verified starter datasets; if those also
 fail, check the connection or add data manually from the dataset step.
 
 An NVIDIA **HTTP 503** with `content safety screening is temporarily
-unavailable` is a server-side outage, not a bad key or prompt. v2.0.9 retries
+unavailable` is a server-side outage, not a bad key or prompt. v2.1.0 retries
 `429` and all `5xx` responses automatically, honoring `Retry-After` and
 otherwise waiting 5s, 15s and 30s. The AI screen shows the wait. If all four
 attempts fail, wait a minute and tap **Ask AI to design** again.
 
-If downloads hit **HTTP 429**, v2.0.9 retries with `Retry-After`/exponential
-backoff, caches dataset metadata, and paces row pages. When the limit persists it
-stops instead of hammering the endpoint, keeps the AI plan, and shows **Retry
-dataset downloads**. Wait a minute, add a Hugging Face token on Home for higher
-limits, or switch network, then retry. The AI downloads at most six suggestions
-with 100-1000 rows each to reduce request pressure.
+If downloads hit **HTTP 429**, v2.1.0 retries with `Retry-After`/exponential
+backoff and caches dataset metadata. When the limit persists it stops instead of
+hammering the endpoint, keeps the AI plan, and shows **Retry dataset
+downloads**. Wait a minute, add a Hugging Face token on Home for higher limits,
+or switch network, then retry. Page requests run in parallel, so downloads are
+bounded by the network and the split size rather than a fixed row cap.
 
 ## Using the app
 

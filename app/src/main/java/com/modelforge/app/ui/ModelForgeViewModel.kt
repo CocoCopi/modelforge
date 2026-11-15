@@ -755,7 +755,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         aiRateLimited = false
         val suggestions = plan.datasets
         for ((position, suggestion) in suggestions.withIndex()) {
-            tryApplyDataset(suggestion, "${position + 1}/${suggestions.size}", dataDir)
+            tryApplyDataset(suggestion, "${position + 1}/${suggestions.size}", dataDir, modelId)
             if (aiRateLimited) return
         }
         if (_wizard.value.datasets.size > before || _wizard.value.datasets.isNotEmpty()) return
@@ -769,7 +769,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         for ((position, fallback) in fallbacks.withIndex()) {
             currentCoroutineContext().ensureActive()
             _aiPlanner.update { it.copy(stage = "Trying verified starter data ${position + 1}/${fallbacks.size}") }
-            if (tryApplyDataset(fallback, "fallback ${position + 1}/${fallbacks.size}", dataDir)) {
+            if (tryApplyDataset(fallback, "fallback ${position + 1}/${fallbacks.size}", dataDir, modelId)) {
                 fallbacksApplied++
                 if (fallbacksApplied >= 2) return
             }
@@ -780,7 +780,8 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun tryApplyDataset(
         suggestion: AiDatasetSuggestion,
         label: String,
-        dataDir: File
+        dataDir: File,
+        modelId: String
     ): Boolean {
         currentCoroutineContext().ensureActive()
         val id = suggestion.datasetId.trim()
@@ -1159,7 +1160,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 ?.firstOrNull { it.name == state.configName }
                 ?.splitRows?.get(name)
                 ?: 0L
-            it.copy(splitName = name, availableRows = known)
+            state.copy(splitName = name, availableRows = known)
         }
         refreshRowCount()
     }

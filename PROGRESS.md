@@ -792,3 +792,36 @@ fixed and rerun.
 Limitations: the full architecture/modality engine is still not implemented.
 Cap removal, HF Parquet/resume fallback, NCM, AI architecture runtime, non-text
 training and full end-to-end quality gates remain open as listed above.
+
+## Production release v2.1.0 - full rows, 1M context, custom steps
+
+Status: IN PROGRESS - CI verifies the Kotlin/Android build, native tests and the
+x86_64 emulator job after the feature commit and the compile fixes below.
+
+- Dataset rows are no longer capped at 5,000. The wizard has an exact row field,
+  quick presets and an **Entire split** action. Split sizes come from
+  `dataset_info.splits[].num_examples`; when absent, one lightweight `/rows`
+  request supplies `num_rows_total`.
+- Text downloads fetch six 100-row pages concurrently, write pages in order,
+  remove the artificial page delay, and raise OkHttp's dispatcher limits. The
+  free-space guard is `availableBytes - 64 MiB`, minimum 1 MB.
+- Context spans 128 to 1,000,000 tokens with a logarithmic slider and presets.
+  The learned position table was replaced by fixed sinusoidal positions, so
+  context length adds no parameters and no context-sized allocation.
+- The parameter formula (Kotlin and C++) no longer includes `context * d_model`.
+  Legacy v1 checkpoints and packed files still load; their position table is
+  skipped and sinusoidal positions are used.
+- Training steps are user-editable at every entry point. The 100-2,000 clamps in
+  `AiPlanner`, the ViewModel and the UI were removed, and AI row suggestions are
+  no longer capped at 5,000.
+- Native tests cover a 1,000,000-token config, independent parameter count and
+  forward pass. Kotlin tests cover context-independent parameter counts, split
+  sizes and ordered concurrent page downloads.
+- Compile fixes after CI run 43691525503: `tryApplyDataset` now receives the
+  model id for the free-space guard, and `selectSplit` copies from `state`.
+
+Honest limitation: 1,000,000 tokens is a positional-capacity ceiling. Training
+still uses the device sequence length (usually 128-256), and attention cost grows
+with tokens², so practical inference remains RAM- and time-limited. Audio,
+video, document and image trainers, NCM, the AI architecture runtime and full
+end-to-end quality gates remain open.
