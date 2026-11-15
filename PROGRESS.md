@@ -795,8 +795,14 @@ training and full end-to-end quality gates remain open as listed above.
 
 ## Production release v2.1.0 - full rows, 1M context, custom steps
 
-Status: IN PROGRESS - CI verifies the Kotlin/Android build, native tests and the
-x86_64 emulator job after the feature commit and the compile fixes below.
+Status: DONE - CI run 43692528303 green (build + x86_64 emulator). Release:
+https://github.com/CocoCopi/modelforge/releases/tag/v2.1.0
+
+- Version `2.1.0` (`versionCode 12`), signed with the stable release key.
+- APK SHA-256:
+  `b33fb70111b41c0b03754856fc5467dae07b361725f41f7b3c80ccb7085a9d0d`
+- AAB SHA-256:
+  `7aaf10ab6e124373e3c8d1cefd310192583fcc2084a4cf802c29e7b8b6a1df39`
 
 - Dataset rows are no longer capped at 5,000. The wizard has an exact row field,
   quick presets and an **Entire split** action. Split sizes come from
@@ -819,6 +825,8 @@ x86_64 emulator job after the feature commit and the compile fixes below.
   sizes and ordered concurrent page downloads.
 - Compile fixes after CI run 43691525503: `tryApplyDataset` now receives the
   model id for the free-space guard, and `selectSplit` copies from `state`.
+  Run 43691953680 then failed only on a unit test that referenced the wrong
+  derivation field; run 43692528303 passed.
 
 Honest limitation: 1,000,000 tokens is a positional-capacity ceiling. Training
 still uses the device sequence length (usually 128-256), and attention cost grows
