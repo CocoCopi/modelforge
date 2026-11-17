@@ -97,10 +97,11 @@ android {
 
     packaging {
         resources {
+            // Dependency licence and notice files must stay in the APK: some
+            // libraries (Apache-2.0, BSD, MIT) require their notices to be
+            // distributed with the binary.
             excludes += setOf(
-                "/META-INF/{AL2.0,LGPL2.1}",
-                "/META-INF/LICENSE*",
-                "/META-INF/NOTICE*"
+                "/META-INF/versions/9/previous-compilation-data.bin"
             )
         }
     }

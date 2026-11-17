@@ -11,7 +11,7 @@ data class DatasetMixEntry(
     val columns: List<String>,
     val weight: Float,
     val cacheFile: String,
-    val rows: Int = 0,
+    val rows: Long = 0L,
     val bytes: Long = 0L,
     val license: String? = null,
     val nonCommercial: Boolean = false

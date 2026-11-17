@@ -14,6 +14,11 @@ class TrainingRestartReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val store = ModelStore(context)
         val modelId = store.activeModelId() ?: return
+        val manifest = store.loadManifest(modelId)
+        if (manifest == null || !manifest.settings.autoResume) {
+            store.setActive(modelId, false)
+            return
+        }
         val state = store.loadLiveState(modelId)
         if (state?.status == TrainingStatus.COMPLETED ||
             state?.status == TrainingStatus.STOPPED ||

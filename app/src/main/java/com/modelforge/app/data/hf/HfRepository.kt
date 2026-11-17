@@ -175,26 +175,28 @@ class HfRepository(
         config: String,
         split: String,
         columns: List<String>,
-        maxRows: Int,
+        maxRows: Long,
         maxBytes: Long,
         destination: File,
         pageSize: Int = 100,
-        concurrency: Int = 6,
+        concurrency: Int = 12,
         onProgress: (DownloadStats) -> Unit = {}
     ): DownloadStats = withContext(Dispatchers.IO) {
         destination.parentFile?.mkdirs()
         var offset = 0L
-        var writtenRows = 0
+        var writtenRows = 0L
         var writtenBytes = 0L
         val preview = StringBuilder()
         var totalRows = Long.MAX_VALUE
-        val workers = concurrency.coerceIn(1, 12)
+        // The datasets-server caps length at 100 rows per page, so the only
+        // remaining lever is how many pages are in flight at once.
+        val workers = concurrency.coerceIn(1, 16)
         val pageRows = pageSize.coerceIn(1, 100)
 
         destination.bufferedWriter(Charsets.UTF_8).use { writer ->
             while (writtenRows < maxRows && writtenBytes < maxBytes && offset < totalRows) {
                 currentCoroutineContext().ensureActive()
-                val stopOffset = minOf(totalRows, maxRows.toLong())
+                val stopOffset = minOf(totalRows, maxRows)
                 val offsets = (0 until workers)
                     .map { offset + it.toLong() * pageRows }
                     .filter { it < stopOffset }

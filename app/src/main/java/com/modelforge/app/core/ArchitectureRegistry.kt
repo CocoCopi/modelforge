@@ -85,7 +85,7 @@ object ArchitectureRegistry {
             inputs = listOf(Modality.TEXT),
             outputs = listOf(Modality.TEXT),
             datasetFormat = DatasetFormat.TEXT_CORPUS,
-            supportedBits = listOf(2, 3, 4, 8, 16, 32),
+            supportedBits = listOf(2, 3, 4, 8),
             trainable = true
         )
 

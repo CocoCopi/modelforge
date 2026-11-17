@@ -197,6 +197,34 @@ Java_com_modelforge_app_nativebridge_NativeBridge_nativeSavePacked(
     }
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_modelforge_app_nativebridge_NativeBridge_nativeSaveGguf(
+    JNIEnv* env, jobject /*thiz*/, jlong handle, jstring path, jint ggml_type) {
+    GPT* m = from_handle(handle);
+    if (!m) return JNI_FALSE;
+    try {
+        const std::string p = to_string(env, path);
+        if (p.empty()) return JNI_FALSE;
+        return m->save_gguf(p, ggml_type) ? JNI_TRUE : JNI_FALSE;
+    } catch (...) {
+        return JNI_FALSE;
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_modelforge_app_nativebridge_NativeBridge_nativeSaveSafetensors(
+    JNIEnv* env, jobject /*thiz*/, jlong handle, jstring path, jboolean fp16) {
+    GPT* m = from_handle(handle);
+    if (!m) return JNI_FALSE;
+    try {
+        const std::string p = to_string(env, path);
+        if (p.empty()) return JNI_FALSE;
+        return m->save_safetensors(p, fp16 != JNI_FALSE) ? JNI_TRUE : JNI_FALSE;
+    } catch (...) {
+        return JNI_FALSE;
+    }
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_modelforge_app_nativebridge_NativeBridge_nativeLoadPacked(
     JNIEnv* env, jobject /*thiz*/, jstring path) {

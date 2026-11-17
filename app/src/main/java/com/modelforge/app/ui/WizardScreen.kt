@@ -995,14 +995,15 @@ private fun SelectedDatasetCard(
                 state.splitName
             ) { mutableStateOf(state.rows.toString()) }
             LaunchedEffect(state.rows) {
-                if (rowsText.toIntOrNull() != state.rows) rowsText = state.rows.toString()
+                if (rowsText.toLongOrNull() != state.rows) rowsText = state.rows.toString()
             }
             OutlinedTextField(
                 value = rowsText,
                 onValueChange = { raw ->
-                    val digits = raw.filter { it.isDigit() }.take(10)
+                    // Long, not Int: "entire split" can exceed two billion rows.
+                    val digits = raw.filter { it.isDigit() }.take(12)
                     rowsText = digits
-                    digits.toIntOrNull()?.let(vm::updateRows)
+                    digits.toLongOrNull()?.let(vm::updateRows)
                 },
                 label = { Text("Exact row count") },
                 singleLine = true,
@@ -1013,16 +1014,16 @@ private fun SelectedDatasetCard(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                listOf(1_000, 10_000, 100_000, 1_000_000).forEach { rows ->
+                listOf(1_000L, 10_000L, 100_000L, 1_000_000L).forEach { rows ->
                     Choice(
-                        text = ConfigDeriver.formatCount(rows.toLong()),
+                        text = ConfigDeriver.formatCount(rows),
                         selected = state.rows == rows,
                         onClick = { vm.updateRows(rows) }
                     )
                 }
                 Choice(
                     text = if (state.rowCountBusy) "counting…" else "Entire split",
-                    selected = state.availableRows > 0L && state.rows.toLong() >= state.availableRows,
+                    selected = state.availableRows > 0L && state.rows >= state.availableRows,
                     onClick = vm::useEntireSplit
                 )
             }
@@ -1045,12 +1046,30 @@ private fun SelectedDatasetCard(
                     color = ForgeColors.inkMuted
                 )
             }
-            LedgerStat("mix weight", String.format("%.1fx", state.weight))
+            LedgerStat("mix weight", String.format(Locale.US, "%.2fx", state.weight))
+            // The slider is a quick control; the text field allows any positive
+            // multiplier up to the engine limit so one dataset can dominate.
+            var weightText by remember(state.weight) {
+                mutableStateOf(String.format(Locale.US, "%.2f", state.weight))
+            }
+            OutlinedTextField(
+                value = weightText,
+                onValueChange = { raw ->
+                    val cleaned = raw.filter { it.isDigit() || it == '.' }
+                    weightText = cleaned
+                    cleaned.toFloatOrNull()?.takeIf { it.isFinite() && it > 0f }
+                        ?.let(vm::updateWeight)
+                },
+                label = { Text("Mix weight (0.01x–1000x)") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier.fillMaxWidth()
+            )
             Slider(
-                value = state.weight,
+                value = state.weight.coerceIn(0.01f, 10f),
                 onValueChange = vm::updateWeight,
-                valueRange = 0.5f..5f,
-                steps = 8
+                valueRange = 0.01f..10f,
+                steps = 0
             )
 
             if (state.datasetBusy) {
