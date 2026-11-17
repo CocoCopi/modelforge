@@ -840,7 +840,9 @@ end-to-end quality gates remain open.
 
 ## Production hardening - correctness, safety and interchange exports
 
-Status: IN PROGRESS - branch `production-hardening`, CI run 44110510350.
+Status: DONE - branch `production-hardening`, CI run 44119123600 green (host
+C++ tests, 95 JVM tests, Paparazzi, debug APK, signed release APK/AAB and the
+x86_64 emulator job). Released as v2.2.0 (`versionCode 13`).
 
 Ten previously identified defects were addressed, and the app gained GGUF and
 safetensors exports.
