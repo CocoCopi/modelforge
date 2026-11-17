@@ -9,6 +9,26 @@ val ciKeystore = System.getenv("MF_KEYSTORE_PATH")
     ?.let { file(it) }
     ?.takeIf { it.exists() }
 
+val keystorePassword = System.getenv("MF_KEYSTORE_PASSWORD")
+val keyPassword = System.getenv("MF_KEY_PASSWORD")
+val signingMaterialComplete = ciKeystore != null &&
+    !keystorePassword.isNullOrBlank() &&
+    !keyPassword.isNullOrBlank()
+
+// A release must never be published unsigned. This check lives in Gradle so
+// it holds for every CI runner and every task graph, not only for one
+// workflow file: if a release task is requested and the signing material is
+// missing, the build fails instead of producing an unverifiable APK.
+val releaseTaskRequested = gradle.startParameter.taskNames.any {
+    it.contains("release", ignoreCase = true)
+}
+if (releaseTaskRequested && !signingMaterialComplete) {
+    throw GradleException(
+        "MF_KEYSTORE_PATH / MF_KEYSTORE_PASSWORD / MF_KEY_PASSWORD are required for " +
+            "release builds. Refusing to build an unsigned release artifact."
+    )
+}
+
 android {
     namespace = "com.modelforge.app"
     compileSdk = 34
@@ -36,12 +56,12 @@ android {
     }
 
     signingConfigs {
-        if (ciKeystore != null) {
+        if (signingMaterialComplete) {
             create("ci") {
                 storeFile = ciKeystore
-                storePassword = System.getenv("MF_KEYSTORE_PASSWORD")
+                storePassword = keystorePassword
                 keyAlias = System.getenv("MF_KEY_ALIAS") ?: "modelforge"
-                keyPassword = System.getenv("MF_KEY_PASSWORD")
+                keyPassword = keyPassword
             }
         }
     }
@@ -52,12 +72,13 @@ android {
                 abiFilters.clear()
                 abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
             }
-            if (ciKeystore != null) {
+            if (signingMaterialComplete) {
                 signingConfig = signingConfigs.getByName("ci")
             }
         }
         release {
-            if (ciKeystore != null) {
+            // releaseTaskRequested + missing material already failed above.
+            if (signingMaterialComplete) {
                 signingConfig = signingConfigs.getByName("ci")
             }
             isMinifyEnabled = true
