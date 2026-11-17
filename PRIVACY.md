@@ -5,7 +5,9 @@ ModelForge has no analytics, telemetry, advertising or crash-upload service.
 ## Data stored on the phone
 
 - Models, checkpoints, tokenizer caches and downloaded datasets stay in the
-  app's private storage.
+  app's private storage. Exported files (`.mfpk`, `.gguf`, `.safetensors`) are
+  written to the app's private storage too and only leave the device when you
+  tap **Share**.
 - The optional Hugging Face token and optional NVIDIA API key are stored with
   Android `EncryptedSharedPreferences`. They are not written to logs, model
   cards or exported model files.
@@ -24,6 +26,12 @@ ModelForge has no analytics, telemetry, advertising or crash-upload service.
   modalities, languages, training-time budget and other wizard choices. The
   NVIDIA key is sent only to NVIDIA.
 - No other network endpoints are used.
+
+## Licence
+
+ModelForge is licensed under the Apache License 2.0 (`LICENSE`, with third-party
+notices in `NOTICE`). The app does not include or download third-party model
+weights; every exported file contains only weights this device trained.
 
 ## Your responsibilities
 
