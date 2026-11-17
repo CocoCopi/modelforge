@@ -106,7 +106,7 @@ data class WizardState(
     val configName: String = "",
     val splitName: String = "",
     val columns: Set<String> = emptySet(),
-    val rows: Int = 1000,
+    val rows: Long = 1000L,
     val availableRows: Long = 0L,
     val rowCountBusy: Boolean = false,
     val weight: Float = 1f,
@@ -156,6 +156,7 @@ data class PlaygroundState(
     val latencyMs: Long = 0L,
     val generatedTokens: Int = 0,
     val exportedBytes: Long = 0L,
+    val lastExportFile: String = "",
     val error: String? = null
 ) {
     companion object {
@@ -530,11 +531,12 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             _aiPlanner.value = AiPlannerState(error = "Secure storage is unavailable on this device, so the key was not saved.")
             return
         }
-        tokenStore.nvidiaToken = value
+        val saved = tokenStore.saveNvidiaToken(value)
         _aiKeyPresent.value = tokenStore.nvidiaToken != null
-        ForgeLog.info("credentials", "NVIDIA key saved=${tokenStore.nvidiaToken != null}")
+        ForgeLog.info("credentials", "NVIDIA key saved=${tokenStore.nvidiaToken != null} ok=$saved")
         _aiPlanner.value = AiPlannerState(
             error = when {
+                !saved -> "The key could not be saved securely. Try again or restart the app."
                 value.isBlank() -> "NVIDIA API key cleared."
                 !_aiKeyPresent.value -> "The key could not be saved securely."
                 else -> null
@@ -1070,6 +1072,9 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 val firstSplit = first?.splits?.firstOrNull().orEmpty()
                 val firstRows = first?.splitRows?.get(firstSplit) ?: 0L
                 updateWizard {
+                    // The user may have picked another dataset while this
+                    // request was in flight; never overwrite the newer choice.
+                    if (it.selectedDataset?.id != summary.id) return@updateWizard it
                     it.copy(
                         structure = structure,
                         configName = first?.name.orEmpty(),
@@ -1086,6 +1091,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 if (first != null && firstRows <= 0L) refreshRowCount()
             } catch (t: Throwable) {
                 updateWizard {
+                    if (it.selectedDataset?.id != summary.id) return@updateWizard it
                     it.copy(
                         availableRows = 0L,
                         rowCountBusy = false,
@@ -1172,8 +1178,8 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun updateRows(value: Int) {
-        updateWizard { it.copy(rows = value.coerceAtLeast(1), error = null) }
+    fun updateRows(value: Long) {
+        updateWizard { it.copy(rows = value.coerceAtLeast(1L), error = null) }
     }
 
     fun useEntireSplit() {
@@ -1182,34 +1188,60 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             updateWizard { it.copy(error = "The split row count is still unknown. Try again in a moment.") }
             return
         }
-        updateRows(total.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+        updateRows(total)
     }
 
+    /**
+     * Weight is a mixing multiplier, not a percentage. The old 0.1x-5x clamp
+     * made it impossible to ask for a strongly dominant dataset; only a
+     * non-positive value is rejected because it would silently drop the data.
+     */
     fun updateWeight(value: Float) {
-        updateWizard { it.copy(weight = value.coerceIn(0.1f, 5f)) }
+        if (!value.isFinite()) return
+        updateWizard { it.copy(weight = value.coerceIn(0.01f, 1000f)) }
     }
 
     fun downloadSelectedDataset() {
         val state = _wizard.value
         val modelId = state.modelId ?: return
         val summary = state.selectedDataset ?: return
+        if (state.datasetBusy) return
         if (state.configName.isBlank() || state.splitName.isBlank() || state.columns.isEmpty()) {
             updateWizard {
                 it.copy(error = "Choose a config, split and at least one text column.")
             }
             return
         }
-        val index = state.datasets.size
-        val destination = File(store.dataDir(modelId), "dataset_$index.txt")
+        if (state.datasets.any {
+                it.datasetId == summary.id && it.config == state.configName &&
+                    it.split == state.splitName
+            }
+        ) {
+            updateWizard {
+                it.copy(error = "This dataset, config and split are already in the mix.")
+            }
+            return
+        }
+        // A UUID keeps two downloads of the same dataset, and repeated
+        // add/remove cycles, from ever sharing or overwriting a cache file.
+        val destination = File(
+            store.dataDir(modelId),
+            "dataset_${UUID.randomUUID()}.txt"
+        )
+        val requestedRows = state.rows
+        val requestedConfig = state.configName
+        val requestedSplit = state.splitName
+        val requestedColumns = state.columns.toList()
+        val requestedWeight = state.weight
         viewModelScope.launch {
             updateWizard { it.copy(datasetBusy = true, datasetProgress = null, error = null) }
             try {
                 val stats = hf.downloadText(
                     datasetId = summary.id,
-                    config = state.configName,
-                    split = state.splitName,
-                    columns = state.columns.toList(),
-                    maxRows = state.rows,
+                    config = requestedConfig,
+                    split = requestedSplit,
+                    columns = requestedColumns,
+                    maxRows = requestedRows,
                     maxBytes = freeDownloadBytes(modelId),
                     destination = destination
                 ) { progress ->
@@ -1218,10 +1250,10 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 val license = summary.resolvedLicense()
                 val entry = DatasetMixEntry(
                     datasetId = summary.id,
-                    config = state.configName,
-                    split = state.splitName,
-                    columns = state.columns.toList(),
-                    weight = state.weight,
+                    config = requestedConfig,
+                    split = requestedSplit,
+                    columns = requestedColumns,
+                    weight = requestedWeight,
                     cacheFile = destination.name,
                     rows = stats.rows,
                     bytes = stats.bytes,
@@ -1244,8 +1276,15 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             } catch (t: Throwable) {
+                // A partial file must never be left behind: a later resume or
+                // changed row count would otherwise mix truncated text.
+                runCatching { destination.delete() }
                 updateWizard {
-                    it.copy(datasetBusy = false, error = t.message ?: "Download failed.")
+                    it.copy(
+                        datasetBusy = false,
+                        datasetProgress = null,
+                        error = t.message ?: "Download failed."
+                    )
                 }
             }
         }
@@ -1254,12 +1293,12 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     fun removeDataset(index: Int) {
         updateWizard { state ->
             val entry = state.datasets.getOrNull(index) ?: return@updateWizard state
+            val remaining = state.datasets.filterIndexed { i, _ -> i != index }
             val id = state.modelId
-            if (id != null) {
-                val file = File(store.dataDir(id), entry.cacheFile)
-                if (file.exists()) file.delete()
+            if (id != null && remaining.none { it.cacheFile == entry.cacheFile }) {
+                runCatching { File(store.dataDir(id), entry.cacheFile).delete() }
             }
-            state.copy(datasets = state.datasets.filterIndexed { i, _ -> i != index })
+            state.copy(datasets = remaining)
         }
     }
 
@@ -1639,6 +1678,12 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         if (state.busy || state.modelId.isBlank()) return
         val id = state.modelId
         val bits = state.bits
+        if (bits !in intArrayOf(2, 3, 4, 8)) {
+            _playground.update {
+                it.copy(error = "Packed export supports 2, 3, 4 and 8 bit only.")
+            }
+            return
+        }
         val checkpoint = store.bestCheckpoint(id)
         if (!checkpoint.exists()) {
             _playground.update {
@@ -1663,7 +1708,8 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                             busy = false,
                             status = "Exported ${target.name}",
                             mode = PlaygroundState.MODE_PACKED,
-                            exportedBytes = target.length()
+                            exportedBytes = target.length(),
+                            lastExportFile = target.absolutePath
                         )
                     }
                 } finally {
@@ -1676,6 +1722,82 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                         status = "",
                         error = t.message ?: "Export failed."
                     )
+                }
+            }
+        }
+    }
+
+    /** GGML tensor type: 0 = F32, 1 = F16, 2 = Q4_0, 8 = Q8_0. */
+    fun exportGguf(ggmlType: Int) {
+        if (ggmlType !in intArrayOf(0, 1, 2, 8)) return
+        val label = when (ggmlType) {
+            1 -> "GGUF F16"
+            2 -> "GGUF Q4_0"
+            8 -> "GGUF Q8_0"
+            else -> "GGUF F32"
+        }
+        val suffix = when (ggmlType) {
+            1 -> "f16"
+            2 -> "q4_0"
+            8 -> "q8_0"
+            else -> "f32"
+        }
+        exportInterchange(label, "model-$suffix.gguf") { model, target ->
+            model.saveGguf(target.absolutePath, ggmlType)
+        }
+    }
+
+    fun exportSafetensors(fp16: Boolean) {
+        exportInterchange(
+            if (fp16) "safetensors F16" else "safetensors F32",
+            if (fp16) "model-f16.safetensors" else "model-f32.safetensors"
+        ) { model, target ->
+            model.saveSafetensors(target.absolutePath, fp16)
+        }
+    }
+
+    private fun exportInterchange(
+        label: String,
+        fileName: String,
+        save: (NativeModel, File) -> Boolean
+    ) {
+        val state = _playground.value
+        if (state.busy || state.modelId.isBlank()) return
+        val id = state.modelId
+        val checkpoint = store.bestCheckpoint(id)
+        if (!checkpoint.exists()) {
+            _playground.update {
+                it.copy(error = "No best checkpoint yet. Start or finish training first.")
+            }
+            return
+        }
+        viewModelScope.launch(Dispatchers.Default) {
+            _playground.update {
+                it.copy(busy = true, status = "Exporting $label…", error = null)
+            }
+            try {
+                val model = NativeModel.load(checkpoint.absolutePath)
+                    ?: throw IllegalStateException("Could not load the best checkpoint.")
+                try {
+                    val dir = File(store.modelDir(id), "export").apply { mkdirs() }
+                    val target = File(dir, fileName)
+                    if (!save(model, target)) {
+                        throw IllegalStateException("The native exporter rejected the $label export.")
+                    }
+                    _playground.update {
+                        it.copy(
+                            busy = false,
+                            status = "Exported ${target.name} (${formatBytes(target.length())})",
+                            exportedBytes = target.length(),
+                            lastExportFile = target.absolutePath
+                        )
+                    }
+                } finally {
+                    model.close()
+                }
+            } catch (t: Throwable) {
+                _playground.update {
+                    it.copy(busy = false, status = "", error = t.message ?: "$label export failed.")
                 }
             }
         }
@@ -1702,17 +1824,25 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun saveToken(value: String) {
-        tokenStore.token = value
+        val saved = tokenStore.saveToken(value)
         _tokenPresent.value = tokenStore.token != null
-        ForgeLog.info("credentials", "Hugging Face token saved=${tokenStore.token != null}")
-        _notice.value = if (value.isBlank()) "Hugging Face token cleared." else "Token saved securely."
+        ForgeLog.info("credentials", "Hugging Face token saved=${tokenStore.token != null} ok=$saved")
+        _notice.value = when {
+            !saved -> "The token could not be saved securely. Try again or restart the app."
+            value.isBlank() -> "Hugging Face token cleared."
+            else -> "Token saved securely."
+        }
     }
 
     fun clearToken() {
-        tokenStore.clear()
-        _tokenPresent.value = false
-        ForgeLog.info("credentials", "Hugging Face token cleared")
-        _notice.value = "Hugging Face token cleared."
+        val cleared = tokenStore.clear()
+        _tokenPresent.value = tokenStore.token != null
+        ForgeLog.info("credentials", "Hugging Face token cleared ok=$cleared")
+        _notice.value = if (cleared) {
+            "Hugging Face token cleared."
+        } else {
+            "The token could not be cleared from secure storage. Try again."
+        }
     }
 
     fun clearNotice() {

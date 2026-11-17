@@ -7,11 +7,15 @@ There is no cloud training and no downloaded model weights: the app builds a
 byte-level BPE tokenizer, trains the network on data from Hugging Face, runs
 quantization-aware training, writes checkpoints, and exports packed 2/3/4/8-bit
 models. The playground generates text from either the full-precision checkpoint
-or a packed export and can share the packed file.
+or a packed export and can share the packed file. Models can also be exported as
+**GGUF** (F32/F16/Q4_0/Q8_0) and **safetensors** (F32/F16) for tooling and
+archival.
 
 Status: v2.1.0 production build. The repository builds and tests on GitHub
 Actions and publishes a signed release APK/AAB. See
 [Honest limitations](#honest-limitations) before relying on model quality.
+
+Licence: Apache License 2.0 (see `LICENSE` and `NOTICE`).
 
 ## Features
 
@@ -23,13 +27,15 @@ Actions and publishes a signed release APK/AAB. See
 - **Real training service** - foreground service with progress notification,
   pause/resume/stop actions, partial wake lock, battery/thermal auto-pause and
   auto-resume, boot resume, and atomic checkpoints. `last.mfck` keeps AdamW
-  state for exact resume; `best.mfck` is weights-only for export.
+  state for exact resume; `best.mfck` is weights-only for export. Training
+  keeps running in the background until you stop it, and the service serializes
+  every command so a stale run can never clobber a new one.
 - **Hugging Face datasets** - search, config/split/text-column discovery,
   exact split sizes, license warnings, row/byte progress, weighted mixing,
   tokenizer training and a token-id cache. The row field has no 5,000-row cap:
-  enter any count or use **Entire split**. Downloads fetch six 100-row pages in
-  parallel with no artificial page delay and stop at the split end or the
-  free-space guard.
+  enter any count or use **Entire split**. Downloads fetch up to twelve 100-row
+  pages in parallel with no artificial page delay and stop at the split end or
+  the free-space guard.
 - **Up to 1,000,000-token context** - a logarithmic slider spans 128 to 1M
   tokens with quick presets. Positions use fixed sinusoidal values, so context
   length adds no parameters and no context-sized position table.
@@ -41,6 +47,11 @@ Actions and publishes a signed release APK/AAB. See
 - **Packed deployment format** - `MFPK` file with fp32 embeddings/norms/biases/
   tied head and packed linear weights plus fp32 scales; packed inference decodes
   groups on the fly instead of materializing fp32 matrices.
+- **Interchange exports** - GGUF v3 (`F32`, `F16`, `Q4_0`, `Q8_0`) and
+  safetensors (`F32`, `F16`) written by the native engine from the best
+  checkpoint. GGUF carries an explicit `modelforge` architecture tag and
+  metadata describing the fixed sinusoidal positions and LayerNorm, so the
+  files are honest about what they are.
 - **Compose UI** - interactive model wizard, live training dashboard with a
   loss chart and samples, model details, an identity check and a playground with
   prompt/temperature/top-k/top-p controls, measured tokens/second, export and
@@ -74,6 +85,14 @@ Actions and publishes a signed release APK/AAB. See
   text with repetition and grammar mistakes, not chatbot-level answers.
 - Release APKs are `arm64-v8a` only. Debug/CI builds also include `x86_64` so the emulator test job can run; no 32-bit build is produced.
 - 2-bit and 3-bit exports are experimental; 4-bit is the recommended default.
+  16-bit and 32-bit are **not** packed-training widths; use the GGUF F16/F32 or
+  safetensors F16/F32 exports for those precisions.
+- GGUF exports are archival/tooling containers, not llama.cpp-compatible
+  models: ModelForge uses fixed sinusoidal positions and LayerNorm, while
+  llama.cpp expects RoPE and RMSNorm. The file records this in its metadata
+  rather than pretending the two are equivalent.
+- ONNX, TensorFlow Lite and CoreML exports are **not** implemented. The app
+  does not pretend to write them.
 - Training time and memory vary a lot by phone. The app reports measured
   tokens/second, RAM and an ETA instead of guessing.
 - The Compose screens are compiled into the release APK. CI now launches them
@@ -144,6 +163,9 @@ bounded by the network and the split size rather than a fixed row cap.
    RAM, ETA, battery/thermal state, a loss curve and generated samples.
 5. **Playground** - generate from the best checkpoint, or export a packed model
    and switch the source to it. Use **Share file** to send the `.mfpk` file.
+   **Interchange export** writes GGUF (`F32`/`F16`/`Q4_0`/`Q8_0`) and
+   safetensors (`F32`/`F16`) files from the best checkpoint and shares them the
+   same way.
 
 Models, datasets and checkpoints stay in the app's private storage and are
 removed by **Delete model**.
@@ -172,7 +194,9 @@ ctest --test-dir build-native --output-on-failure
 CI (`.github/workflows/build.yml`) runs the host C++ tests, JVM tests,
 `assembleDebug`, `assembleRelease` and `bundleRelease` on every push, verifies
 the release signature, and uploads the debug APK, release APK, AAB and R8
-mapping. The same workflow is the source of truth for "green".
+mapping. The same workflow is the source of truth for "green". The release job
+is skipped for pull requests (forks have no signing secret) and fails loudly if
+the signing secret is missing, so an unsigned release can never be published.
 
 ## Measured results
 
@@ -199,9 +223,10 @@ export is roughly 4.3x smaller.
 ```
 app/src/main/
   cpp/
-    core/gpt.{h,cpp}       GPT, backprop, AdamW, QAT, checkpoints, packed model
-    jni.cpp                JNI surface (model, training, packed, config)
-    tests/                 native config/gradient/overfit/packed tests
+    core/gpt.{h,cpp}       GPT, backprop, AdamW, QAT, checkpoints, packed model,
+                           GGUF and safetensors exporters
+    jni.cpp                JNI surface (model, training, packed, exports, config)
+    tests/                 native config/gradient/overfit/packed/concurrency/export
   java/com/modelforge/app/
     core/                  hardware detection, config derivation, manifest shape
     data/                  model store, manifests, tokenizer, Hugging Face client
@@ -232,6 +257,10 @@ checkpoints. The packed file layout is mirrored exactly by
   automated coverage.
 - Export currently targets the best checkpoint; there is no separate
   fine-tune/merge workflow.
+- No ONNX, TensorFlow Lite or CoreML export; the implemented set is MFPK,
+  GGUF and safetensors.
+- The AI dataset agent uses a bounded tool loop (up to 12 model calls and a
+  15-minute budget) so a runaway plan cannot hang the app.
 - NCM and AI-designed architectures remain planning-only until native engines
   and tests exist.
 

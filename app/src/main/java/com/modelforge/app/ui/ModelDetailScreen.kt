@@ -49,7 +49,10 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
 
         val config = manifest.config
         val checkpoints = vm.checkpointMegabytes(modelId)
-        val estimatedPacked = config.packedExportBytes(config.bits)
+        // Only 2/3/4/8-bit have a real packed export. Anything else must not
+        // be shown as a packed size it cannot produce.
+        val packedBits = config.bits.takeIf { it in intArrayOf(2, 3, 4, 8) }
+        val estimatedPacked = packedBits?.let { config.packedExportBytes(it) } ?: 0L
         val status = state?.status ?: "not started"
         val active = state?.isActive == true
 
@@ -107,12 +110,25 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
 
             SectionCard("Storage") {
                 InfoRow("Full-precision estimate", formatBytes(config.fp32Bytes()))
-                InfoRow("Packed estimate (${config.bits}-bit)", formatBytes(estimatedPacked), ForgeColors.emberText)
+                if (packedBits != null) {
+                    InfoRow(
+                        "Packed estimate ($packedBits-bit)",
+                        formatBytes(estimatedPacked),
+                        ForgeColors.emberText
+                    )
+                } else {
+                    InfoRow(
+                        "Packed estimate",
+                        "no ${config.bits}-bit packed export",
+                        ForgeColors.inkMuted
+                    )
+                }
                 InfoRow("Last checkpoint", if (checkpoints.first > 0) "${checkpoints.first} MB" else "none")
                 InfoRow("Best checkpoint", if (checkpoints.second > 0L) "${checkpoints.second} MB" else "none")
                 Text(
                     "The packed estimate uses the exact export layout. Actual files are written " +
-                        "when you export from the playground.",
+                        "when you export from the playground. GGUF and safetensors exports are " +
+                        "written from the same best checkpoint.",
                     style = MaterialTheme.typography.bodySmall,
                     color = ForgeColors.inkMuted
                 )

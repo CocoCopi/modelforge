@@ -112,7 +112,7 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
                             ForgeOutlineButton(
                                 "Share file",
                                 onClick = {
-                                    sharePacked(context, vm.packedFile(modelId, state.bits))
+                                    shareFile(context, vm.packedFile(modelId, state.bits))
                                 },
                                 modifier = Modifier.weight(1f)
                             )
@@ -139,6 +139,72 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
                         color = ForgeColors.inkMuted
                     )
                 }
+            }
+
+            SectionCard("Interchange export") {
+                Text(
+                    "Writes the best checkpoint into a standard container. F32/F16 keep full " +
+                        "precision; Q4_0/Q8_0 use GGML block quantization.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ForgeColors.inkMuted
+                )
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        0 to "GGUF F32",
+                        1 to "GGUF F16",
+                        2 to "GGUF Q4_0",
+                        8 to "GGUF Q8_0"
+                    ).forEach { (type, label) ->
+                        Choice(
+                            text = label,
+                            selected = false,
+                            onClick = { vm.exportGguf(type) }
+                        )
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ForgeOutlineButton(
+                        "Safetensors F32",
+                        onClick = { vm.exportSafetensors(false) },
+                        enabled = !state.busy,
+                        modifier = Modifier.weight(1f)
+                    )
+                    ForgeOutlineButton(
+                        "Safetensors F16",
+                        onClick = { vm.exportSafetensors(true) },
+                        enabled = !state.busy,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                if (state.busy && state.status.isNotBlank()) {
+                    Text(state.status, style = ForgeType.mono, color = ForgeColors.emberText)
+                }
+                val lastExport = remember(state.lastExportFile) {
+                    state.lastExportFile.takeIf { it.isNotBlank() }?.let(::File)
+                }
+                if (lastExport != null && lastExport.exists()) {
+                    InfoRow(
+                        lastExport.name,
+                        formatBytes(lastExport.length()),
+                        ForgeColors.verdigris
+                    )
+                    ForgeOutlineButton(
+                        "Share ${lastExport.name}",
+                        onClick = { shareFile(context, lastExport) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                Text(
+                    "GGUF files carry a modelforge architecture tag. llama.cpp/Ollama expect " +
+                        "RoPE and RMSNorm, so treat these files as archival/tooling exports, " +
+                        "not identical llama.cpp inference. Safetensors names follow the " +
+                        "Llama/PyTorch layout.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ForgeColors.inkMuted
+                )
             }
 
             SectionCard("Response") {
@@ -312,7 +378,7 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
     }
 }
 
-private fun sharePacked(context: Context, file: File) {
+private fun shareFile(context: Context, file: File) {
     if (!file.exists()) return
     runCatching {
         val uri = FileProvider.getUriForFile(

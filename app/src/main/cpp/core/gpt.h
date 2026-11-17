@@ -162,6 +162,15 @@ public:
     // and everything else kept in fp32. PackedModel can load and run it.
     bool save_packed(const std::string& path, int bits, int group = 32) const;
 
+    // Interchange exports. ggml_type is a GGML tensor type: 0 = F32,
+    // 1 = F16, 2 = Q4_0, 8 = Q8_0. The container is GGUF v3 with a
+    // "modelforge" architecture tag; see README for compatibility notes.
+    bool save_gguf(const std::string& path, int ggml_type = 0) const;
+
+    // Hugging Face-style safetensors container. All tensors are written as
+    // F32 or F16; names match the common Llama/PyTorch layout.
+    bool save_safetensors(const std::string& path, bool fp16 = false) const;
+
     // QAT is applied to linear layers only. bits==0 disables it.
     void set_qat(int bits, int group = 32);
     int qat_bits() const { return qat_bits_; }
@@ -175,6 +184,11 @@ public:
     long long step() const { return step_; }
     void set_step(long long s) { step_ = s; }
 
+    // Number of updates actually applied to the AdamW moments. This is kept
+    // separate from step_ so a weights-only recovery checkpoint can keep the
+    // training progress counter while restarting bias correction from zero.
+    long long optimizer_step() const { return adam_step_; }
+
     ForwardCache& cache() { return cache_; }
 
 private:
@@ -187,6 +201,7 @@ private:
     int qat_bits_ = 0;
     int qat_group_ = 32;
     long long step_ = 0;
+    long long adam_step_ = 0;
     ForwardCache cache_;
 
     friend struct PackedModel;

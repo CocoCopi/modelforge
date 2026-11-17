@@ -6,8 +6,10 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <exception>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <thread>
@@ -36,6 +38,25 @@ inline void add_positional(int pos, int d, float* x) {
     }
 }
 
+// Every entry point that accepts caller-supplied token ids must fail closed:
+// an out-of-range id indexes embedding rows and, during backward, writes past
+// the gradient buffer. Checking B*T ids is negligible next to a training step.
+bool tokens_in_range(const int* tokens, int count, int vocab) {
+    if (tokens == nullptr || count <= 0 || vocab <= 0) return false;
+    for (int i = 0; i < count; ++i) {
+        if (tokens[i] < 0 || tokens[i] >= vocab) return false;
+    }
+    return true;
+}
+
+bool targets_in_range(const int* targets, int count, int vocab) {
+    if (targets == nullptr || count <= 0 || vocab <= 0) return false;
+    for (int i = 0; i < count; ++i) {
+        if (targets[i] < 0 || targets[i] >= vocab) return false;
+    }
+    return true;
+}
+
 int hardware_threads() {
     static int cached = [] {
         int hc = static_cast<int>(std::thread::hardware_concurrency());
@@ -56,40 +77,94 @@ public:
         return *pool;
     }
 
+    // Runs fn(0..n-1) on the shared pool and blocks until all indices finish.
+    //
+    // The pool is process-global, so several GPT/PackedModel instances can call
+    // this concurrently (training in the foreground service while the
+    // playground generates). Per-call state therefore lives in a heap Call
+    // object owned by shared_ptr; nothing refers to this stack frame after a
+    // task is queued. Whole regions are serialized by region_mu_ because the
+    // worker pool has no notion of task ownership, and a worker must never
+    // start a nested region (this would deadlock with every worker busy).
     void run(int n, const std::function<void(int)>& fn, int min_parallel) {
         if (n <= 0) return;
         const int workers = static_cast<int>(threads_.size());
         if (workers <= 0 || n < min_parallel) {
-            for (int i = 0; i < n; ++i) fn(i);
+            run_inline(n, fn);
             return;
         }
+
+        std::lock_guard<std::mutex> region(region_mu_);
+        auto call = std::make_shared<Call>();
+        call->fn = &fn;
+        call->n = n;
+
         const int w = std::min(workers, n);
-        std::atomic<int> next{0};
-        std::atomic<int> done{0};
         {
             std::lock_guard<std::mutex> lock(mu_);
-            all_done_ = false;
+            call->remaining = w;
             for (int t = 0; t < w; ++t) {
-                tasks_.emplace_back([&] {
-                    for (;;) {
-                        const int i = next.fetch_add(1);
-                        if (i >= n) break;
-                        fn(i);
-                    }
-                    if (done.fetch_add(1) + 1 == w) {
-                        std::lock_guard<std::mutex> lk(done_mu_);
-                        all_done_ = true;
-                        done_cv_.notify_all();
-                    }
-                });
+                tasks_.emplace_back([this, call] { execute(call); });
             }
         }
         cv_.notify_all();
-        std::unique_lock<std::mutex> lk(done_mu_);
-        done_cv_.wait(lk, [&] { return all_done_; });
+
+        std::unique_lock<std::mutex> lk(call->done_mu);
+        call->done_cv.wait(lk, [&] { return call->finished; });
+        lk.unlock();
+        if (call->error) std::rethrow_exception(call->error);
     }
 
 private:
+    struct Call {
+        const std::function<void(int)>* fn = nullptr;
+        int n = 0;
+        int remaining = 0;
+        std::atomic<int> next{0};
+        std::atomic<bool> failed{false};
+        std::mutex done_mu;
+        std::condition_variable done_cv;
+        bool finished = false;
+        std::exception_ptr error;
+    };
+
+    static void run_inline(int n, const std::function<void(int)>& fn) {
+        // Preserve the first exception so callers see a deterministic failure
+        // instead of a partially applied parallel region.
+        std::exception_ptr first;
+        for (int i = 0; i < n; ++i) {
+            try {
+                fn(i);
+            } catch (...) {
+                if (!first) first = std::current_exception();
+            }
+        }
+        if (first) std::rethrow_exception(first);
+    }
+
+    void execute(const std::shared_ptr<Call>& call) {
+        for (;;) {
+            if (call->failed.load(std::memory_order_relaxed)) break;
+            const int i = call->next.fetch_add(1, std::memory_order_relaxed);
+            if (i >= call->n) break;
+            try {
+                (*call->fn)(i);
+            } catch (...) {
+                {
+                    std::lock_guard<std::mutex> lk(call->done_mu);
+                    if (!call->error) call->error = std::current_exception();
+                }
+                call->failed.store(true, std::memory_order_relaxed);
+                break;
+            }
+        }
+        std::lock_guard<std::mutex> lk(call->done_mu);
+        if (--call->remaining == 0) {
+            call->finished = true;
+            call->done_cv.notify_all();
+        }
+    }
+
     ThreadPool() {
         const int nt = hardware_threads();
         for (int i = 0; i < nt; ++i) {
@@ -106,7 +181,12 @@ private:
                 task = std::move(tasks_.front());
                 tasks_.pop_front();
             }
-            task();
+            // Tasks must never throw: execute() already captures callable
+            // exceptions, so an escape here would be unrecoverable.
+            try {
+                task();
+            } catch (...) {
+            }
         }
     }
 
@@ -114,9 +194,7 @@ private:
     std::deque<std::function<void()>> tasks_;
     std::mutex mu_;
     std::condition_variable cv_;
-    std::mutex done_mu_;
-    std::condition_variable done_cv_;
-    bool all_done_ = false;
+    std::mutex region_mu_;
 };
 
 template <typename Fn>
@@ -476,18 +554,25 @@ double cross_entropy_loss(const Tensor& logits, const int* targets, Tensor& dlog
     const int n = logits.rows;
     const int V = logits.cols;
     dlogits.ensure(n, V);
+    if (n <= 0 || V <= 0 || targets == nullptr) return -1.0;
     double total = 0.0;
+    const float invn = 1.0f / static_cast<float>(n);
     for (int r = 0; r < n; ++r) {
         const float* lr = logits.row(r);
+        float* dr = dlogits.row(r);
+        const int tgt = targets[r];
+        if (tgt < 0 || tgt >= V) {
+            // Should be unreachable: callers validate first. Report a large
+            // loss and a zero gradient instead of reading out of bounds.
+            total += 1e6;
+            continue;
+        }
         float mx = -1e30f;
         for (int v = 0; v < V; ++v) mx = std::max(mx, lr[v]);
         float sum = 0.0f;
         for (int v = 0; v < V; ++v) sum += std::exp(lr[v] - mx);
-        const int tgt = targets[r];
         const float p = std::exp(lr[tgt] - mx) / sum;
         total += -std::log(std::max(p, 1e-30f));
-        float* dr = dlogits.row(r);
-        const float invn = 1.0f / static_cast<float>(n);
         for (int v = 0; v < V; ++v) {
             float prob = std::exp(lr[v] - mx) / sum;
             dr[v] = (prob - (v == tgt ? 1.0f : 0.0f)) * invn;
@@ -547,6 +632,7 @@ bool GPT::init(const ModelConfig& cfg, uint64_t seed) {
     qat_bits_ = 0;
     qat_group_ = 32;
     step_ = 0;
+    adam_step_ = 0;
     cache_ = ForwardCache{};
     return true;
 }
@@ -601,6 +687,10 @@ std::vector<const Linear*> GPT::linears() const {
 }
 
 void GPT::set_qat(int bits, int group) {
+    // QAT only makes sense for a real packed width. Anything else disables it
+    // instead of allocating a full float copy of every linear weight.
+    if (bits < 2 || bits >= 32) bits = 0;
+    if (group <= 0) group = 32;
     qat_bits_ = bits;
     qat_group_ = group;
     for (auto* lin : linears()) {
@@ -699,14 +789,35 @@ void GPT::forward_logits(const int* tokens, int B, int T) {
 }
 
 float GPT::forward(const int* tokens, const int* targets, int B, int T) {
-    if (!cfg_.valid() || B <= 0 || T <= 0 || T > cfg_.context) return 0.0f;
+    const int64_t count = static_cast<int64_t>(B) * static_cast<int64_t>(T);
+    if (!cfg_.valid() || B <= 0 || T <= 0 || T > cfg_.context ||
+        count <= 0 || count > (int64_t{1} << 24)) {
+        cache_ = ForwardCache{};
+        return -1.0f;
+    }
+    const int n = static_cast<int>(count);
+    if (!tokens_in_range(tokens, n, cfg_.vocab) ||
+        (targets != nullptr && !targets_in_range(targets, n, cfg_.vocab))) {
+        cache_ = ForwardCache{};
+        return -1.0f;
+    }
     forward_logits(tokens, B, T);
-    if (targets == nullptr) return 0.0f;
-    return static_cast<float>(cross_entropy_loss(cache_.logits, targets, cache_.dlogits));
+    // Inference-only forwards must not leave a stale dlogits buffer behind for
+    // an explicit backward() call to consume.
+    if (targets == nullptr) {
+        cache_.dlogits = Tensor{};
+        return 0.0f;
+    }
+    const double loss = cross_entropy_loss(cache_.logits, targets, cache_.dlogits);
+    return std::isfinite(loss) ? static_cast<float>(loss) : -1.0f;
 }
 
 void GPT::backward() {
     if (cache_.logits.d.empty() || cache_.dlogits.d.empty()) return;
+    if (cache_.dlogits.rows != cache_.logits.rows ||
+        cache_.dlogits.cols != cache_.logits.cols) {
+        return;
+    }
     const int d = cfg_.d_model;
     const int df = cfg_.d_ff;
     const int V = cfg_.vocab;
@@ -798,11 +909,12 @@ void GPT::backward() {
 
 void GPT::adam_update(float lr, float weight_decay) {
     ++step_;
+    ++adam_step_;
     const float b1 = 0.9f;
     const float b2 = 0.999f;
     const float eps = 1e-8f;
-    const double bc1 = 1.0 - std::pow(static_cast<double>(b1), static_cast<double>(step_));
-    const double bc2 = 1.0 - std::pow(static_cast<double>(b2), static_cast<double>(step_));
+    const double bc1 = 1.0 - std::pow(static_cast<double>(b1), static_cast<double>(adam_step_));
+    const double bc2 = 1.0 - std::pow(static_cast<double>(b2), static_cast<double>(adam_step_));
     const float inv_bc1 = static_cast<float>(1.0 / bc1);
     const float inv_bc2 = static_cast<float>(1.0 / bc2);
 
@@ -825,8 +937,21 @@ void GPT::adam_update(float lr, float weight_decay) {
 
 float GPT::train_step(const int* tokens, const int* targets, int B, int T,
                       float lr, float weight_decay) {
+    const int64_t count = static_cast<int64_t>(B) * static_cast<int64_t>(T);
+    if (targets == nullptr || B <= 0 || T <= 0 || T > cfg_.context ||
+        count <= 0 || !tokens_in_range(tokens, static_cast<int>(count), cfg_.vocab) ||
+        !targets_in_range(targets, static_cast<int>(count), cfg_.vocab)) {
+        cache_ = ForwardCache{};
+        return -1.0f;
+    }
     zero_grads();
     const float loss = forward(tokens, targets, B, T);
+    if (!(loss >= 0.0f) || !std::isfinite(loss)) {
+        // A rejected batch must never apply gradients from the previous step.
+        cache_ = ForwardCache{};
+        zero_grads();
+        return -1.0f;
+    }
     backward();
     adam_update(lr, weight_decay);
     zero_grads();
@@ -1131,6 +1256,10 @@ bool GPT::load_checkpoint(const std::string& path, bool with_optimizer) {
     if (!ok) return false;
 
     step_ = step;
+    // With optimizer state loaded, the moments match step; a weights-only
+    // recovery file has zero moments, so bias correction must start at zero
+    // instead of pretending hundreds of updates were applied.
+    adam_step_ = load_opt ? step : 0;
     set_qat(qat_bits, qat_group);
     return true;
 }
@@ -1318,14 +1447,444 @@ bool GPT::save_packed(const std::string& path, int bits, int group) const {
         for (const auto* lin : {&l.wq, &l.wk, &l.wv, &l.wo, &l.w1, &l.w2}) {
             std::vector<uint8_t> packed;
             std::vector<float> scales;
-            quantize_into(lin->weight.data(), lin->out(), lin->in(),
-                          bits, gs, packed, scales);
+            // Export the weights the model actually trained with under QAT.
+            const bool qat_ready = lin->qat_bits > 0 &&
+                lin->fake_weight.d.size() == lin->weight.w.size();
+            const float* src = qat_ready ? lin->fake_weight.data() : lin->weight.data();
+            quantize_into(src, lin->out(), lin->in(), bits, gs, packed, scales);
             ok &= write_floats(f, lin->bias.data(), lin->bias.w.size());
             ok &= write_bytes(f, packed);
             ok &= write_floats(f, scales.data(), scales.size());
         }
     }
 
+    std::fclose(f);
+    if (!ok) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Interchange exports: GGUF v3 and safetensors
+// ---------------------------------------------------------------------------
+
+namespace {
+
+void ex_u16(std::vector<uint8_t>& out, uint16_t v) {
+    out.push_back(static_cast<uint8_t>(v & 0xff));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xff));
+}
+
+void ex_u32(std::vector<uint8_t>& out, uint32_t v) {
+    for (int i = 0; i < 4; ++i) out.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
+}
+
+void ex_u64(std::vector<uint8_t>& out, uint64_t v) {
+    for (int i = 0; i < 8; ++i) out.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
+}
+
+void ex_f32(std::vector<uint8_t>& out, float v) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &v, sizeof(bits));
+    ex_u32(out, bits);
+}
+
+void ex_string(std::vector<uint8_t>& out, const std::string& s) {
+    ex_u64(out, static_cast<uint64_t>(s.size()));
+    out.insert(out.end(), s.begin(), s.end());
+}
+
+// IEEE-754 binary32 to binary16 with round-to-nearest-even.
+uint16_t ex_f32_to_f16(float value) {
+    uint32_t f = 0;
+    std::memcpy(&f, &value, sizeof(f));
+    const uint32_t sign = (f >> 16) & 0x8000u;
+    const uint32_t exp = (f >> 23) & 0xffu;
+    const uint32_t mant = f & 0x7fffffu;
+    if (exp == 0xffu) {
+        return static_cast<uint16_t>(sign | (mant == 0 ? 0x7c00u : 0x7e00u));
+    }
+    int32_t e = static_cast<int32_t>(exp) - 127 + 15;
+    if (e >= 0x1f) return static_cast<uint16_t>(sign | 0x7c00u);
+    if (e <= 0) {
+        if (e < -10) return static_cast<uint16_t>(sign);
+        uint32_t m = mant | 0x800000u;
+        const uint32_t shift = static_cast<uint32_t>(14 - e);
+        uint32_t half = m >> shift;
+        const uint32_t rem = m & ((1u << shift) - 1u);
+        const uint32_t halfway = 1u << (shift - 1);
+        if (rem > halfway || (rem == halfway && (half & 1u))) ++half;
+        return static_cast<uint16_t>(sign | half);
+    }
+    uint32_t half = mant >> 13;
+    const uint32_t rem = mant & 0x1fffu;
+    if (rem > 0x1000u || (rem == 0x1000u && (half & 1u))) {
+        ++half;
+        if (half == 0x400u) {
+            half = 0;
+            ++e;
+            if (e >= 0x1f) return static_cast<uint16_t>(sign | 0x7c00u);
+        }
+    }
+    return static_cast<uint16_t>(sign | (static_cast<uint32_t>(e) << 10) | (half & 0x3ffu));
+}
+
+struct ExTensor {
+    std::string name;
+    std::vector<uint64_t> ne;  // GGML order: ne[0] is the innermost dimension
+    uint32_t type = 0;         // GGML type
+    const float* data = nullptr;
+    uint64_t count = 0;
+    uint64_t offset = 0;
+    std::vector<uint64_t> shape;  // row-major shape for safetensors
+};
+
+uint64_t ex_type_size(uint32_t type, uint64_t count) {
+    switch (type) {
+        case 1: return count * 2;                 // F16
+        case 2: return (count / 32) * 18;         // Q4_0
+        case 8: return (count / 32) * 34;         // Q8_0
+        default: return count * 4;                // F32
+    }
+}
+
+void ex_encode(const ExTensor& t, std::vector<uint8_t>& out) {
+    if (t.type == 1) {
+        out.reserve(static_cast<size_t>(t.count) * 2);
+        for (uint64_t i = 0; i < t.count; ++i) ex_u16(out, ex_f32_to_f16(t.data[i]));
+        return;
+    }
+    if (t.type == 8) {
+        out.reserve(static_cast<size_t>((t.count / 32) * 34));
+        for (uint64_t b = 0; b < t.count; b += 32) {
+            float amax = 0.0f;
+            for (int j = 0; j < 32; ++j) amax = std::max(amax, std::fabs(t.data[b + j]));
+            const float d = amax / 127.0f;
+            const float id = d != 0.0f ? 1.0f / d : 0.0f;
+            ex_u16(out, ex_f32_to_f16(d));
+            for (int j = 0; j < 32; ++j) {
+                int q = static_cast<int>(std::round(t.data[b + j] * id));
+                q = std::max(-127, std::min(127, q));
+                out.push_back(static_cast<uint8_t>(static_cast<int8_t>(q)));
+            }
+        }
+        return;
+    }
+    if (t.type == 2) {
+        out.reserve(static_cast<size_t>((t.count / 32) * 18));
+        for (uint64_t b = 0; b < t.count; b += 32) {
+            float amax = 0.0f;
+            float max = 0.0f;
+            for (int j = 0; j < 32; ++j) {
+                const float v = t.data[b + j];
+                if (std::fabs(v) > amax) {
+                    amax = std::fabs(v);
+                    max = v;
+                }
+            }
+            const float d = max / -8.0f;
+            const float id = d != 0.0f ? 1.0f / d : 0.0f;
+            ex_u16(out, ex_f32_to_f16(d));
+            for (int j = 0; j < 16; ++j) {
+                int q0 = static_cast<int>(t.data[b + j] * id + 8.5f);
+                int q1 = static_cast<int>(t.data[b + j + 16] * id + 8.5f);
+                q0 = std::max(0, std::min(15, q0));
+                q1 = std::max(0, std::min(15, q1));
+                out.push_back(static_cast<uint8_t>(q0 | (q1 << 4)));
+            }
+        }
+        return;
+    }
+    out.reserve(static_cast<size_t>(t.count) * 4);
+    for (uint64_t i = 0; i < t.count; ++i) ex_f32(out, t.data[i]);
+}
+
+bool ex_write_file(const std::string& path, const std::vector<uint8_t>& head,
+                   const std::vector<ExTensor>& tensors) {
+    const std::string tmp = path + ".tmp";
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f) return false;
+    bool ok = head.empty() || std::fwrite(head.data(), 1, head.size(), f) == head.size();
+    const uint64_t align = 32;
+    auto pad_to = [&](uint64_t& position) {
+        const uint64_t rem = position % align;
+        if (rem == 0) return true;
+        const std::vector<uint8_t> zeros(static_cast<size_t>(align - rem), 0);
+        position += zeros.size();
+        return std::fwrite(zeros.data(), 1, zeros.size(), f) == zeros.size();
+    };
+    uint64_t position = head.size();
+    ok = ok && pad_to(position);
+    for (const auto& t : tensors) {
+        std::vector<uint8_t> body;
+        ex_encode(t, body);
+        ok = ok && (body.empty() || std::fwrite(body.data(), 1, body.size(), f) == body.size());
+        position += body.size();
+        ok = ok && pad_to(position);
+    }
+    std::fclose(f);
+    if (!ok) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
+std::string ex_json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (char c : s) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(c));
+                    out += buf;
+                } else {
+                    out.push_back(c);
+                }
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+bool GPT::save_gguf(const std::string& path, int ggml_type) const {
+    if (!cfg_.valid()) return false;
+    if (ggml_type != 0 && ggml_type != 1 && ggml_type != 2 && ggml_type != 8) return false;
+
+    const int d = cfg_.d_model;
+    const int V = cfg_.vocab;
+    std::vector<ExTensor> tensors;
+
+    auto add = [&](const std::string& name, std::vector<uint64_t> ne,
+                   const float* data, uint64_t count, bool quantizable) {
+        ExTensor t;
+        t.name = name;
+        t.ne = std::move(ne);
+        t.data = data;
+        t.count = count;
+        t.type = static_cast<uint32_t>(ggml_type);
+        if (ggml_type >= 2) {
+            // Block formats need a multiple of 32 along the innermost axis.
+            if (!quantizable || t.ne.empty() || (t.ne[0] % 32) != 0) {
+                t.type = 1;  // F16 fallback
+            }
+        }
+        // safetensors shape is the row-major order callers expect.
+        t.shape.assign(t.ne.rbegin(), t.ne.rend());
+        tensors.push_back(std::move(t));
+    };
+
+    add("token_embd.weight", {static_cast<uint64_t>(d), static_cast<uint64_t>(V)},
+        wte_.data(), static_cast<uint64_t>(V) * d, true);
+    add("output_norm.weight", {static_cast<uint64_t>(d)},
+        lnf_g_.data(), static_cast<uint64_t>(d), false);
+    add("output_norm.bias", {static_cast<uint64_t>(d)},
+        lnf_b_.data(), static_cast<uint64_t>(d), false);
+
+    for (size_t i = 0; i < layers_.size(); ++i) {
+        const Layer& l = layers_[i];
+        const std::string p = "blk." + std::to_string(i) + ".";
+        auto lin = [&](const char* suffix, const Linear& layer) {
+            const std::string base = p + suffix;
+            add(base + ".weight",
+                {static_cast<uint64_t>(layer.in()), static_cast<uint64_t>(layer.out())},
+                layer.weight.data(), static_cast<uint64_t>(layer.in()) * layer.out(), true);
+            add(base + ".bias", {static_cast<uint64_t>(layer.out())},
+                layer.bias.data(), static_cast<uint64_t>(layer.out()), false);
+        };
+        add(p + "attn_norm.weight", {static_cast<uint64_t>(d)}, l.ln1.gamma.data(), d, false);
+        add(p + "attn_norm.bias", {static_cast<uint64_t>(d)}, l.ln1.beta.data(), d, false);
+        lin("attn_q", l.wq);
+        lin("attn_k", l.wk);
+        lin("attn_v", l.wv);
+        lin("attn_output", l.wo);
+        add(p + "ffn_norm.weight", {static_cast<uint64_t>(d)}, l.ln2.gamma.data(), d, false);
+        add(p + "ffn_norm.bias", {static_cast<uint64_t>(d)}, l.ln2.beta.data(), d, false);
+        lin("ffn_up", l.w1);
+        lin("ffn_down", l.w2);
+    }
+
+    std::vector<uint8_t> meta;
+    uint64_t kv_count = 0;
+    auto kv_string = [&](const char* key, const std::string& value) {
+        ex_string(meta, key);
+        ex_u32(meta, 8);
+        ex_string(meta, value);
+        ++kv_count;
+    };
+    auto kv_u32 = [&](const char* key, uint32_t value) {
+        ex_string(meta, key);
+        ex_u32(meta, 4);
+        ex_u32(meta, value);
+        ++kv_count;
+    };
+    auto kv_f32 = [&](const char* key, float value) {
+        ex_string(meta, key);
+        ex_u32(meta, 6);
+        ex_f32(meta, value);
+        ++kv_count;
+    };
+    auto kv_bool = [&](const char* key, bool value) {
+        ex_string(meta, key);
+        ex_u32(meta, 7);
+        meta.push_back(value ? 1 : 0);
+        ++kv_count;
+    };
+
+    kv_string("general.architecture", "modelforge");
+    kv_string("general.name", "ModelForge GPT");
+    kv_u32("general.file_type", static_cast<uint32_t>(ggml_type));
+    kv_u32("modelforge.context_length", static_cast<uint32_t>(cfg_.context));
+    kv_u32("modelforge.embedding_length", static_cast<uint32_t>(d));
+    kv_u32("modelforge.block_count", static_cast<uint32_t>(layers_.size()));
+    kv_u32("modelforge.feed_forward_length", static_cast<uint32_t>(cfg_.d_ff));
+    kv_u32("modelforge.attention.head_count", static_cast<uint32_t>(cfg_.heads));
+    kv_u32("modelforge.vocab_size", static_cast<uint32_t>(V));
+    kv_f32("modelforge.layer_norm_epsilon", kLnEps);
+    kv_string("modelforge.position_encoding", "sinusoidal");
+    kv_string("modelforge.normalization", "layernorm");
+    kv_bool("modelforge.tied_embeddings", true);
+    kv_string("modelforge.export_note",
+              "Exact ModelForge weights. llama.cpp/Ollama need RoPE + RMSNorm; "
+              "this container is for archival and tooling, not identical inference.");
+
+    std::vector<uint8_t> head;
+    ex_u32(head, 0x46554747u);  // "GGUF"
+    ex_u32(head, 3);
+    ex_u64(head, static_cast<uint64_t>(tensors.size()));
+    ex_u64(head, kv_count);
+    head.insert(head.end(), meta.begin(), meta.end());
+
+    uint64_t offset = 0;
+    for (auto& t : tensors) {
+        ex_string(head, t.name);
+        ex_u32(head, static_cast<uint32_t>(t.ne.size()));
+        for (uint64_t dim : t.ne) ex_u64(head, dim);
+        ex_u32(head, t.type);
+        t.offset = offset;
+        ex_u64(head, t.offset);
+        offset += ex_type_size(t.type, t.count);
+        offset = (offset + 31u) & ~uint64_t{31};
+    }
+    return ex_write_file(path, head, tensors);
+}
+
+bool GPT::save_safetensors(const std::string& path, bool fp16) const {
+    if (!cfg_.valid()) return false;
+    const int d = cfg_.d_model;
+    const int V = cfg_.vocab;
+    const std::string dtype = fp16 ? "F16" : "F32";
+    const uint64_t elem = fp16 ? 2 : 4;
+
+    std::vector<ExTensor> tensors;
+    auto add = [&](const std::string& name, std::vector<uint64_t> shape,
+                   const float* data, uint64_t count) {
+        ExTensor t;
+        t.name = name;
+        t.shape = std::move(shape);
+        t.data = data;
+        t.count = count;
+        tensors.push_back(std::move(t));
+    };
+
+    add("model.embed_tokens.weight",
+        {static_cast<uint64_t>(V), static_cast<uint64_t>(d)},
+        wte_.data(), static_cast<uint64_t>(V) * d);
+    add("model.norm.weight", {static_cast<uint64_t>(d)}, lnf_g_.data(), d);
+    add("model.norm.bias", {static_cast<uint64_t>(d)}, lnf_b_.data(), d);
+
+    for (size_t i = 0; i < layers_.size(); ++i) {
+        const Layer& l = layers_[i];
+        const std::string p = "model.layers." + std::to_string(i) + ".";
+        auto lin = [&](const std::string& suffix, const Linear& layer) {
+            add(p + suffix + ".weight",
+                {static_cast<uint64_t>(layer.out()), static_cast<uint64_t>(layer.in())},
+                layer.weight.data(), static_cast<uint64_t>(layer.in()) * layer.out());
+            add(p + suffix + ".bias", {static_cast<uint64_t>(layer.out())},
+                layer.bias.data(), static_cast<uint64_t>(layer.out()));
+        };
+        add(p + "input_layernorm.weight", {static_cast<uint64_t>(d)}, l.ln1.gamma.data(), d);
+        add(p + "input_layernorm.bias", {static_cast<uint64_t>(d)}, l.ln1.beta.data(), d);
+        lin("self_attn.q_proj", l.wq);
+        lin("self_attn.k_proj", l.wk);
+        lin("self_attn.v_proj", l.wv);
+        lin("self_attn.o_proj", l.wo);
+        add(p + "post_attention_layernorm.weight", {static_cast<uint64_t>(d)},
+            l.ln2.gamma.data(), d);
+        add(p + "post_attention_layernorm.bias", {static_cast<uint64_t>(d)},
+            l.ln2.beta.data(), d);
+        lin("mlp.up_proj", l.w1);
+        lin("mlp.down_proj", l.w2);
+    }
+
+    // Data offsets are relative to the start of the data section and follow
+    // the tensor order exactly.
+    uint64_t cursor = 0;
+    std::string json = "{\"__metadata__\":{";
+    json += "\"format\":\"pt\",";
+    json += "\"modelforge.architecture\":\"gpt\",";
+    json += "\"modelforge.context_length\":\"" + std::to_string(cfg_.context) + "\",";
+    json += "\"modelforge.d_model\":\"" + std::to_string(d) + "\",";
+    json += "\"modelforge.layers\":\"" + std::to_string(layers_.size()) + "\",";
+    json += "\"modelforge.heads\":\"" + std::to_string(cfg_.heads) + "\",";
+    json += "\"modelforge.d_ff\":\"" + std::to_string(cfg_.d_ff) + "\",";
+    json += "\"modelforge.position_encoding\":\"sinusoidal\",";
+    json += "\"modelforge.normalization\":\"layernorm\"";
+    json += "}";
+
+    for (const auto& t : tensors) {
+        const uint64_t bytes = t.count * elem;
+        json += ",\"" + ex_json_escape(t.name) + "\":{";
+        json += "\"dtype\":\"" + dtype + "\",\"shape\":[";
+        for (size_t i = 0; i < t.shape.size(); ++i) {
+            if (i) json += ",";
+            json += std::to_string(t.shape[i]);
+        }
+        json += "],\"data_offsets\":[" + std::to_string(cursor) + "," +
+                std::to_string(cursor + bytes) + "]}";
+        cursor += bytes;
+    }
+    json += "}";
+
+    std::vector<uint8_t> head;
+    ex_u64(head, static_cast<uint64_t>(json.size()));
+    head.insert(head.end(), json.begin(), json.end());
+
+    std::vector<ExTensor> payload;
+    payload.reserve(tensors.size());
+    for (auto& t : tensors) {
+        t.type = fp16 ? 1u : 0u;
+        payload.push_back(t);
+    }
+    // The generic writer pads between tensors, which safetensors forbids:
+    // offsets must be exactly contiguous. Write this format directly.
+    const std::string tmp = path + ".tmp";
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f) return false;
+    bool ok = std::fwrite(head.data(), 1, head.size(), f) == head.size();
+    for (const auto& t : payload) {
+        std::vector<uint8_t> body;
+        ex_encode(t, body);
+        ok = ok && (body.empty() || std::fwrite(body.data(), 1, body.size(), f) == body.size());
+    }
     std::fclose(f);
     if (!ok) {
         std::remove(tmp.c_str());
@@ -1446,10 +2005,19 @@ bool PackedModel::load(const std::string& path) {
 }
 
 void PackedModel::forward(const int* tokens, int B, int T) const {
-    if (!cfg_.valid() || tokens == nullptr || B <= 0 || T <= 0 || T > cfg_.context) return;
+    if (!cfg_.valid() || tokens == nullptr || B <= 0 || T <= 0 || T > cfg_.context) {
+        cache_ = ForwardCache{};
+        return;
+    }
     const int d = cfg_.d_model;
     const int V = cfg_.vocab;
-    const int n = B * T;
+    const int64_t count = static_cast<int64_t>(B) * static_cast<int64_t>(T);
+    if (count <= 0 || count > (int64_t{1} << 24) ||
+        !tokens_in_range(tokens, static_cast<int>(count), V)) {
+        cache_ = ForwardCache{};
+        return;
+    }
+    const int n = static_cast<int>(count);
 
     cache_.B = B;
     cache_.T = T;

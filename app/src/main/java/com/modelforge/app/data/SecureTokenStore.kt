@@ -9,6 +9,10 @@ import androidx.security.crypto.MasterKey
  * Stores optional Hugging Face and NVIDIA API credentials in
  * EncryptedSharedPreferences. If the keystore is unavailable the store reports
  * that instead of silently writing a plaintext key.
+ *
+ * Writes return Boolean and commit synchronously: a credential the user
+ * believes they saved must not be lost when the process dies immediately
+ * afterwards, and a failed write must never be reported as success.
  */
 class SecureTokenStore(context: Context) {
 
@@ -29,31 +33,30 @@ class SecureTokenStore(context: Context) {
 
     val isAvailable: Boolean get() = prefs != null
 
-    var token: String?
+    val token: String?
         get() = prefs?.getString(KEY_TOKEN, null)?.takeIf { it.isNotBlank() }
-        set(value) {
-            val p = prefs ?: return
-            p.edit().apply {
-                if (value.isNullOrBlank()) remove(KEY_TOKEN) else putString(KEY_TOKEN, value.trim())
-            }.apply()
-        }
 
-    var nvidiaToken: String?
+    val nvidiaToken: String?
         get() = prefs?.getString(KEY_NVIDIA, null)?.takeIf { it.isNotBlank() }
-        set(value) {
-            val p = prefs ?: return
-            p.edit().apply {
-                if (value.isNullOrBlank()) remove(KEY_NVIDIA) else putString(KEY_NVIDIA, value.trim())
-            }.apply()
-        }
 
-    fun clear() {
-        prefs?.edit()?.remove(KEY_TOKEN)?.apply()
+    /** Returns true when the value was persisted (or cleared). */
+    fun saveToken(value: String?): Boolean {
+        val p = prefs ?: return false
+        val editor = p.edit()
+        if (value.isNullOrBlank()) editor.remove(KEY_TOKEN) else editor.putString(KEY_TOKEN, value.trim())
+        return runCatching { editor.commit() }.getOrDefault(false)
     }
 
-    fun clearNvidia() {
-        prefs?.edit()?.remove(KEY_NVIDIA)?.apply()
+    fun saveNvidiaToken(value: String?): Boolean {
+        val p = prefs ?: return false
+        val editor = p.edit()
+        if (value.isNullOrBlank()) editor.remove(KEY_NVIDIA) else editor.putString(KEY_NVIDIA, value.trim())
+        return runCatching { editor.commit() }.getOrDefault(false)
     }
+
+    fun clear(): Boolean = saveToken(null)
+
+    fun clearNvidia(): Boolean = saveNvidiaToken(null)
 
     companion object {
         private const val FILE_NAME = "modelforge_secrets"

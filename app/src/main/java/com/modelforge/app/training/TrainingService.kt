@@ -28,11 +28,14 @@ import com.modelforge.app.data.TrainingLiveState
 import com.modelforge.app.data.TrainingStatus
 import com.modelforge.app.data.tokenizer.BpeTokenizer
 import com.modelforge.app.nativebridge.NativeModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -51,14 +54,16 @@ class TrainingService : Service() {
         const val ACTION_RESUME = "com.modelforge.app.action.RESUME_TRAINING"
         const val ACTION_STOP = "com.modelforge.app.action.STOP_TRAINING"
         const val EXTRA_MODEL_ID = "model_id"
+        const val EXTRA_EXTEND = "extend_training"
 
         private const val CHANNEL_ID = "modelforge_training"
         private const val NOTIFICATION_ID = 1001
 
-        fun start(context: Context, modelId: String) {
+        fun start(context: Context, modelId: String, extend: Boolean = false) {
             val intent = Intent(context, TrainingService::class.java)
                 .setAction(ACTION_START)
                 .putExtra(EXTRA_MODEL_ID, modelId)
+                .putExtra(EXTRA_EXTEND, extend)
             ContextCompat.startForegroundService(context, intent)
         }
 
@@ -67,27 +72,59 @@ class TrainingService : Service() {
         fun stop(context: Context) = sendAction(context, ACTION_STOP)
 
         private fun sendAction(context: Context, action: String) {
+            // Starting a background service is illegal on API 26+ unless the
+            // app is in a foreground state. The service is already foreground
+            // while training, so these actions only need to reach a live run.
+            if (ModelStore(context).activeModelId() == null) return
             val intent = Intent(context, TrainingService::class.java).setAction(action)
-            runCatching { context.startService(intent) }
+            runCatching { ContextCompat.startForegroundService(context, intent) }
         }
+    }
+
+    private sealed interface Command {
+        data class Start(val modelId: String, val extend: Boolean) : Command
+        data object Pause : Command
+        data object Resume : Command
+        data object Stop : Command
+    }
+
+    /** Per-run control block. A new run never reads the previous run's flags. */
+    private class RunControl(val extend: Boolean) {
+        @Volatile var stopRequested = false
+        @Volatile var paused = false
+        @Volatile var autoPaused = false
+        @Volatile var checkpointRequested = false
+        @Volatile var resumedWithRecovery = false
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private lateinit var store: ModelStore
+    private val commands = Channel<Command>(Channel.UNLIMITED)
     private var job: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var currentModelId: String? = null
     private var modelName: String = ""
-    private var currentState: TrainingLiveState? = null
-
-    @Volatile private var paused = false
-    @Volatile private var autoPaused = false
-    @Volatile private var stopRequested = false
-    @Volatile private var checkpointRequested = false
-    @Volatile private var resumedWithRecovery = false
+    @Volatile private var currentState: TrainingLiveState? = null
+    private var control = RunControl(extend = false)
 
     private var lastNotifyAt = 0L
     private var lastPersistAt = 0L
+
+    /**
+     * Every service command is applied by one coroutine in arrival order. The
+     * training loop is the only other writer, so there is no window in which a
+     * stale job can reset a new job's flags or null its reference.
+     */
+    private val commandJob: Job = scope.launch {
+        for (command in commands) {
+            when (command) {
+                is Command.Start -> handleStart(command)
+                Command.Pause -> pauseTraining(manual = true)
+                Command.Resume -> resumeTraining()
+                Command.Stop -> stopTraining()
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -95,69 +132,78 @@ class TrainingService : Service() {
         createChannel()
     }
 
+    override fun onDestroy() {
+        commands.close()
+        commandJob.cancel()
+        job?.cancel()
+        scope.cancel()
+        releaseWakeLock()
+        super.onDestroy()
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val action = intent?.action
-        when (action) {
-            ACTION_PAUSE -> {
-                pauseTraining(manual = true)
-                if (job == null) stopSelf()
-            }
-            ACTION_RESUME -> {
-                resumeTraining()
-                if (job == null) stopSelf()
-            }
-            ACTION_STOP -> {
-                stopTraining()
-                if (job == null) stopSelf()
-            }
+        when (intent?.action) {
+            ACTION_PAUSE -> commands.trySend(Command.Pause)
+            ACTION_RESUME -> commands.trySend(Command.Resume)
+            ACTION_STOP -> commands.trySend(Command.Stop)
             ACTION_START -> {
                 val id = intent.getStringExtra(EXTRA_MODEL_ID)
-                if (id != null) beginTraining(id)
+                if (id != null) {
+                    commands.trySend(
+                        Command.Start(id, intent.getBooleanExtra(EXTRA_EXTEND, false))
+                    )
+                } else {
+                    stopSelf()
+                }
             }
             null -> {
                 val active = store.activeModelId()
-                if (active != null) {
-                    beginTraining(active)
+                if (active != null && store.loadManifest(active)?.settings?.autoResume != false) {
+                    commands.trySend(Command.Start(active, false))
                 } else {
                     stopSelf()
                 }
             }
         }
-        return if (action == ACTION_START) START_REDELIVER_INTENT else START_STICKY
+        return START_STICKY
     }
 
-    private fun beginTraining(modelId: String) {
-        if (job?.isActive == true) {
-            if (currentModelId == modelId) return
-            stopRequested = true
-            job?.cancel()
+    private suspend fun handleStart(command: Command.Start) {
+        val existing = job
+        if (existing?.isActive == true) {
+            if (currentModelId == command.modelId) return
+            control.stopRequested = true
+            existing.cancelAndJoin()
         }
-        val manifest = store.loadManifest(modelId)
-        modelName = manifest?.name ?: modelId
-        currentModelId = modelId
-        stopRequested = false
-        paused = false
-        autoPaused = false
-        store.setActive(modelId, true)
+        val manifest = store.loadManifest(command.modelId)
+        if (manifest == null) {
+            stopSelf()
+            return
+        }
+        modelName = manifest.name
+        currentModelId = command.modelId
+        control = RunControl(command.extend)
+        store.setActive(command.modelId, true)
         val initial = TrainingLiveState(
-            modelId = modelId,
+            modelId = command.modelId,
             status = TrainingStatus.PREPARING,
             message = "Preparing tokenizer and dataset…",
-            totalSteps = manifest?.settings?.steps ?: 0,
-            batchSize = manifest?.settings?.batchSize ?: 0
+            totalSteps = manifest.settings.steps.coerceAtLeast(1),
+            batchSize = manifest.settings.batchSize
         )
         publishState(initial, persist = true, forceNotify = true)
         startInForeground(initial)
+        val run = control
         job = scope.launch {
-            runTraining(modelId)
+            runTraining(command.modelId, run)
         }
     }
 
     private fun pauseTraining(manual: Boolean) {
-        paused = true
-        autoPaused = false
+        control.paused = true
+        control.autoPaused = false
         releaseWakeLock()
         val state = currentState ?: return
         val updated = if (manual) {
@@ -178,8 +224,8 @@ class TrainingService : Service() {
     }
 
     private fun resumeTraining() {
-        paused = false
-        autoPaused = false
+        control.paused = false
+        control.autoPaused = false
         acquireWakeLock()
         val state = currentState ?: return
         publishState(
@@ -195,9 +241,9 @@ class TrainingService : Service() {
     }
 
     private fun stopTraining() {
-        stopRequested = true
-        paused = false
-        autoPaused = false
+        control.stopRequested = true
+        control.paused = false
+        control.autoPaused = false
         currentState?.let { state ->
             publishState(
                 state.copy(message = "Stopping and saving a checkpoint…", updatedAt = System.currentTimeMillis()),
@@ -207,7 +253,7 @@ class TrainingService : Service() {
         }
     }
 
-    private suspend fun runTraining(modelId: String) {
+    private suspend fun runTraining(modelId: String, run: RunControl) {
         var model: NativeModel? = null
         try {
             val manifest = store.loadManifest(modelId)
@@ -218,7 +264,7 @@ class TrainingService : Service() {
             modelName = manifest.name
             val cfg = manifest.config
             val settings = manifest.settings
-            val totalSteps = settings.steps.coerceAtLeast(1)
+            var totalSteps = settings.steps.coerceAtLeast(1)
             val checkpointEvery = settings.checkpointEvery.coerceAtLeast(1)
             val sampleEvery = settings.sampleEvery.coerceAtLeast(1)
             val seq = min(settings.seqLength, cfg.contextLength).coerceAtLeast(8)
@@ -312,11 +358,17 @@ class TrainingService : Service() {
             publishState(state, persist = false, forceNotify = true)
 
             var memoryMessage: String? = null
-            model = openModel(manifest)
+            model = openModel(manifest, run)
             var step = model!!.step.toInt().coerceAtLeast(0)
-            if (resumedWithRecovery && step > 0) {
+            if (run.resumedWithRecovery && step > 0) {
                 memoryMessage = "Recovered the latest weights from step $step after the app " +
                     "was closed. Optimizer state may restart; progress is preserved."
+            }
+            // "Train again" on a finished model extends the run instead of
+            // reporting that there is nothing to do.
+            if (run.extend && step >= totalSteps) {
+                totalSteps = step + settings.steps.coerceAtLeast(1)
+                state = state.copy(totalSteps = totalSteps)
             }
             if (step >= totalSteps) {
                 finish(
@@ -362,14 +414,17 @@ class TrainingService : Service() {
             var lastNotify = 0L
 
             while (step < totalSteps) {
-                if (stopRequested) break
+                // Cancellation means a new run has taken over; it must not be
+                // treated as a failure of this one.
+                currentCoroutineContext().ensureActive()
+                if (run.stopRequested) break
 
-                if (paused) {
-                    if (autoPaused) {
+                if (run.paused) {
+                    if (run.autoPaused) {
                         val reason = devicePauseReason()
                         if (reason == null) {
-                            paused = false
-                            autoPaused = false
+                            run.paused = false
+                            run.autoPaused = false
                             acquireWakeLock()
                             state = state.copy(
                                 status = TrainingStatus.RUNNING,
@@ -398,7 +453,10 @@ class TrainingService : Service() {
                             delay(10_000)
                         }
                     } else {
-                        delay(500)
+                        while (run.paused && !run.stopRequested) {
+                            currentCoroutineContext().ensureActive()
+                            delay(250)
+                        }
                     }
                     continue
                 }
@@ -408,8 +466,8 @@ class TrainingService : Service() {
                     lastDeviceCheck = now
                     val reason = devicePauseReason()
                     if (reason != null) {
-                        paused = true
-                        autoPaused = true
+                        run.paused = true
+                        run.autoPaused = true
                         releaseWakeLock()
                         state = state.copy(
                             status = TrainingStatus.PAUSED,
@@ -443,7 +501,7 @@ class TrainingService : Service() {
                         )
                     }
                     model!!.close()
-                    model = openModel(manifest)
+                    model = openModel(manifest, run)
                     step = model!!.step.toInt().coerceAtLeast(0)
                     memoryMessage = "Low memory: batch size lowered from $oldBatch to $batch. " +
                         "Training resumed from step $step."
@@ -492,15 +550,15 @@ class TrainingService : Service() {
                 )
 
                 val recoveryDue = RecoveryPolicy.isDue(step, totalSteps, recoveryEvery) ||
-                    checkpointRequested
+                    run.checkpointRequested
                 if (recoveryDue) {
-                    checkpointRequested = false
+                    run.checkpointRequested = false
                     withContext(Dispatchers.IO) {
                         model!!.saveCheckpoint(store.recoveryCheckpoint(modelId).absolutePath, false)
                     }
                 }
 
-                if (step % checkpointEvery == 0 || step == totalSteps || stopRequested) {
+                if (step % checkpointEvery == 0 || step == totalSteps || run.stopRequested) {
                     val last = store.lastCheckpoint(modelId)
                     val ok = withContext(Dispatchers.IO) {
                         model!!.saveCheckpoint(last.absolutePath, true)
@@ -532,13 +590,22 @@ class TrainingService : Service() {
                     model!!.saveCheckpoint(store.lastCheckpoint(modelId).absolutePath, true)
                 }
             }
-            val status = if (stopRequested) TrainingStatus.STOPPED else TrainingStatus.COMPLETED
-            val message = if (stopRequested) {
+            val stopped = run.stopRequested
+            val status = if (stopped) TrainingStatus.STOPPED else TrainingStatus.COMPLETED
+            val message = if (stopped) {
                 "Training stopped at step $step. The checkpoint is saved."
             } else {
                 "Training finished at step $step. Best measured loss ${String.format("%.4f", bestLoss)}."
             }
             finish(modelId, status, message, state.copy(step = step, totalSteps = totalSteps, bestLoss = bestLoss))
+        } catch (cancel: CancellationException) {
+            // Another run is taking over: save what we have and let the
+            // cancellation propagate instead of reporting a training error.
+            runCatching {
+                val path = store.lastCheckpoint(modelId).absolutePath
+                model?.takeIf { it.isOpen }?.saveCheckpoint(path, true)
+            }
+            throw cancel
         } catch (t: TrainingFailure) {
             fail(modelId, t.message ?: "Training failed.", t.suggestion)
         } catch (t: Throwable) {
@@ -551,7 +618,6 @@ class TrainingService : Service() {
         } finally {
             runCatching { model?.close() }
             releaseWakeLock()
-            job = null
         }
     }
 
@@ -622,43 +688,48 @@ class TrainingService : Service() {
         return tokens
     }
 
-    private fun openModel(manifest: ModelManifest): NativeModel {
+    private fun openModel(manifest: ModelManifest, run: RunControl): NativeModel {
+        val cfg = manifest.config
         val last = store.lastCheckpoint(manifest.id)
         val recovery = store.recoveryCheckpoint(manifest.id)
-        val lastStep = CheckpointHeader.readStep(last) ?: -1L
-        val recoveryStep = CheckpointHeader.readStep(recovery) ?: -1L
-        val useRecovery = CheckpointHeader.hasMagic(recovery) && recoveryStep > lastStep
-        resumedWithRecovery = useRecovery
-        val selected = if (useRecovery) recovery else last
-        val cfg = manifest.config
-        val model = if (selected.exists()) {
-            NativeModel.load(selected.absolutePath, withOptimizer = true)
-                ?: throw TrainingFailure(
-                    "The checkpoint could not be loaded.",
-                    "Delete checkpoints/last.mfck for this model and start training again."
-                )
-        } else {
-            NativeModel.create(cfg, System.nanoTime())
+        val best = store.bestCheckpoint(manifest.id)
+        // Try the newest readable checkpoint first: weights-only recovery may
+        // be ahead of last, and a corrupt file must not strand the user.
+        val candidates = listOf(recovery, last, best)
+            .filter { CheckpointHeader.hasMagic(it) }
+            .mapNotNull { file -> CheckpointHeader.readStep(file)?.let { file to it } }
+            .sortedByDescending { it.second }
+
+        var model: NativeModel? = null
+        var selected: File? = null
+        for ((file, _) in candidates) {
+            val loaded = runCatching { NativeModel.load(file.absolutePath, withOptimizer = true) }
+                .getOrNull() ?: continue
+            val c = loaded.config
+            val matches = c.vocabSize == cfg.vocabSize && c.contextLength == cfg.contextLength &&
+                c.dModel == cfg.dModel && c.layers == cfg.layers && c.heads == cfg.heads &&
+                c.dFf == cfg.dFf && c.tiedEmbeddings == cfg.tiedEmbeddings
+            if (matches) {
+                model = loaded
+                selected = file
+                break
+            }
+            loaded.close()
+        }
+
+        run.resumedWithRecovery = selected != null && selected != last
+
+        if (model == null) {
+            model = NativeModel.create(cfg, System.nanoTime())
                 ?: throw TrainingFailure(
                     "The model could not be allocated.",
                     "Close other apps or create a smaller model."
                 )
         }
-        val c = model.config
-        if (c.vocabSize != cfg.vocabSize || c.contextLength != cfg.contextLength ||
-            c.dModel != cfg.dModel || c.layers != cfg.layers || c.heads != cfg.heads ||
-            c.dFf != cfg.dFf || c.tiedEmbeddings != cfg.tiedEmbeddings
-        ) {
-            model.close()
-            throw TrainingFailure(
-                "The checkpoint architecture does not match this model's config.",
-                "Return to Home, delete the broken model and create it again."
-            )
-        }
         if (cfg.bits in 2..8) {
             model.setQuantization(cfg.bits, 32)
         }
-        if (!last.exists()) {
+        if (!last.exists() || selected == null) {
             if (!model.saveCheckpoint(last.absolutePath, true)) {
                 model.close()
                 throw TrainingFailure(
@@ -912,20 +983,20 @@ class TrainingService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        checkpointRequested = true
-        if (store.activeModelId() != null && currentModelId != null) {
+        control.checkpointRequested = true
+        if (store.activeModelId() != null && currentModelId != null && !control.stopRequested) {
             TrainingRestartReceiver.schedule(this, 5_000L)
         }
         super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
-        checkpointRequested = true
-        val active = store.activeModelId()
-        stopRequested = true
+        control.checkpointRequested = true
+        val restart = store.activeModelId() != null && !control.stopRequested
+        control.stopRequested = true
         releaseWakeLock()
         scope.cancel()
-        if (active != null) {
+        if (restart) {
             TrainingRestartReceiver.schedule(this, 10_000L)
         }
         super.onDestroy()

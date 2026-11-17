@@ -12,8 +12,8 @@ import kotlinx.serialization.json.put
 class AiDatasetAgent(
     private val chat: AiChat,
     private val source: AiDatasetSource,
-    private val maxCalls: Int = 6,
-    private val totalTimeoutMs: Long = 420_000L
+    private val maxCalls: Int = 12,
+    private val totalTimeoutMs: Long = 900_000L
 ) {
     suspend fun design(
         apiKey: String,

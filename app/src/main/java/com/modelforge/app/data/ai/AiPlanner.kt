@@ -18,7 +18,7 @@ data class AiDatasetSuggestion(
     val config: String = "",
     val split: String = "train",
     val columns: List<String> = emptyList(),
-    val rows: Int = 1000,
+    val rows: Long = 1000L,
     val weight: Float = 1f,
     val license: String? = null,
     @SerialName("commercial_use") val commercialUse: Boolean = false,
@@ -86,9 +86,11 @@ object AiPlanner {
         non-commercial, say so in the licence field and warnings. Tamil must be
         included when it is selected. For every requested capability (general
         text, identity, reasoning, tool calls, each language, each modality)
-        provide a dataset suggestion, but keep the whole plan compact: at most 8
+        provide a dataset suggestion, but keep the whole plan compact: at most 16
         dataset suggestions total. Give rows and mix weights that fit a small
-        phone model. Optimise for the most fluent, coherent and capable model the
+        phone model. Rows may be any practical positive number, and weights may
+        range from 0.01x to 1000x when one dataset should dominate the mix.
+        Optimise for the most fluent, coherent and capable model the
         phone can train in training_minutes; never default to the smallest
         recipe. Prefer 3-6 complementary datasets with clean, long-form text,
         including a strong general corpus and instruction data. These are
@@ -443,7 +445,7 @@ object AiPlanner {
                 split = split,
                 columns = columns,
                 rows = item.rows.coerceAtLeast(1),
-                weight = item.weight.coerceIn(0.1f, 5f),
+                weight = item.weight.coerceIn(0.01f, 1000f),
                 license = item.license?.trim()?.takeIf { it.isNotBlank() },
                 reason = item.reason.trim()
             )

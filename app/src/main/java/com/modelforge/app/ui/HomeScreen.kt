@@ -189,7 +189,9 @@ fun HomeScreen(vm: ModelForgeViewModel) {
 
 @Composable
 private fun ModelListCard(manifest: ModelManifest, vm: ModelForgeViewModel) {
-    val state = vm.liveState(manifest.id)
+    // Subscribe to live training updates instead of reading the state file once
+    // during composition; cards now update while training runs in the background.
+    val state = rememberTrainingLiveState(vm, manifest.id)
     val status = state?.status ?: "not started"
     val active = state?.isActive == true
     NotebookCard(

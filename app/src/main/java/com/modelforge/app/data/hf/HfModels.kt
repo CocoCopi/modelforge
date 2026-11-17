@@ -131,7 +131,7 @@ data class DatasetStructure(
 )
 
 data class DownloadStats(
-    val rows: Int,
+    val rows: Long,
     val bytes: Long,
     val preview: String
 )

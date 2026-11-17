@@ -62,6 +62,19 @@ class NativeModel private constructor(
         return NativeBridge.nativeSavePacked(handle, path, bits, group)
     }
 
+    /** GGML tensor type: 0 = F32, 1 = F16, 2 = Q4_0, 8 = Q8_0. */
+    @Synchronized
+    fun saveGguf(path: String, ggmlType: Int): Boolean {
+        check(handle != 0L) { "Model is closed" }
+        return NativeBridge.nativeSaveGguf(handle, path, ggmlType)
+    }
+
+    @Synchronized
+    fun saveSafetensors(path: String, fp16: Boolean): Boolean {
+        check(handle != 0L) { "Model is closed" }
+        return NativeBridge.nativeSaveSafetensors(handle, path, fp16)
+    }
+
     @Synchronized
     override fun close() {
         if (handle != 0L) {

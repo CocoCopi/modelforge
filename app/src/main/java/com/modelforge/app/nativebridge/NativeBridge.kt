@@ -58,6 +58,10 @@ object NativeBridge {
 
     external fun nativeSavePacked(handle: Long, path: String, bits: Int, group: Int): Boolean
 
+    external fun nativeSaveGguf(handle: Long, path: String, ggmlType: Int): Boolean
+
+    external fun nativeSaveSafetensors(handle: Long, path: String, fp16: Boolean): Boolean
+
     external fun nativeLoadPacked(path: String): Long
 
     external fun nativePackedFree(handle: Long)

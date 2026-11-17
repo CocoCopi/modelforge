@@ -23,9 +23,12 @@ data class ModelConfig(
     val headDim: Int get() = if (heads > 0) dModel / heads else 0
     val paramsPerHead: Int get() = headDim
 
+    // The engine has no separate output head: logits come from the tied
+    // embedding matrix. This mirrors ModelConfig::valid() in C++ so a config
+    // that would be rejected natively can never be written to a manifest.
     fun isValid(): Boolean =
-        vocabSize > 0 && contextLength > 0 && dModel > 0 && layers > 0 &&
-            heads > 0 && dModel % heads == 0 && dFf > 0
+        tiedEmbeddings && vocabSize > 0 && contextLength > 0 && dModel > 0 &&
+            layers > 0 && heads > 0 && dModel % heads == 0 && dFf > 0
 
     /** Exact parameter count. Must stay in sync with Model::paramCount() in C++. */
     fun paramCount(): Long {
@@ -35,10 +38,9 @@ data class ModelConfig(
         val v = vocabSize.toLong()
         val l = layers.toLong()
         val perLayer = 4L * d * d + 2L * d * df + 9L * d + df
-        val head = if (tiedEmbeddings) 0L else v * d
         // Positions are fixed sinusoidal values, so context length adds no
         // trainable parameters and no context-sized position table.
-        return v * d + l * perLayer + 2L * d + head
+        return v * d + l * perLayer + 2L * d
     }
 
     fun linearWeightCount(): Long {
@@ -92,11 +94,14 @@ data class ModelConfig(
     }
 
     companion object {
-        val LAYER_BITS = intArrayOf(2, 3, 4, 8, 16, 32)
+        /**
+         * Widths the packed (MFPK) exporter and QAT path actually implement.
+         * F16/F32 are export choices in the GGUF and safetensors menus, not
+         * training-compression choices, so they are deliberately absent here.
+         */
+        val LAYER_BITS = intArrayOf(2, 3, 4, 8)
 
         val BIT_EXPLANATIONS = mapOf(
-            32 to "Full fp32. Largest files, best quality, no quantization-aware training.",
-            16 to "Half-precision linear weights. Tiny quality loss, ~2x smaller than fp32.",
             8 to "8-bit linear weights. Very good quality, ~4x smaller. QAT keeps it stable.",
             4 to "4-bit linear weights. The usual sweet spot on phones, ~8x smaller.",
             3 to "3-bit linear weights. Very small, noticeably rougher text.",

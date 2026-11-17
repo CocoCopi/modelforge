@@ -68,7 +68,7 @@ class ArchitectureRegistryTest {
 
     @Test
     fun gpt_supports_the_packed_export_bits() {
-        assertEquals(listOf(2, 3, 4, 8, 16, 32), ArchitectureRegistry.supportedBits(ArchitectureRegistry.GPT_TEXT))
+        assertEquals(listOf(2, 3, 4, 8), ArchitectureRegistry.supportedBits(ArchitectureRegistry.GPT_TEXT))
     }
 
     @Test
