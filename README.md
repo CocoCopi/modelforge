@@ -11,7 +11,7 @@ or a packed export and can share the packed file. Models can also be exported as
 **GGUF** (F32/F16/Q4_0/Q8_0) and **safetensors** (F32/F16) for tooling and
 archival.
 
-Status: v2.1.0 production build. The repository builds and tests on GitHub
+Status: v2.2.0 production build. The repository builds and tests on GitHub
 Actions and publishes a signed release APK/AAB. See
 [Honest limitations](#honest-limitations) before relying on model quality.
 
@@ -109,12 +109,12 @@ Licence: Apache License 2.0 (see `LICENSE` and `NOTICE`).
   position tables from those files are ignored in favour of the new sinusoidal
   positions.
 
-## Install (v2.1.0)
+## Install (v2.2.0)
 
 1. Open [Releases](https://github.com/CocoCopi/modelforge/releases) and download
-   the latest `ModelForge-2.1.0-arm64.apk` directly.
+   the latest `ModelForge-2.2.0-arm64.apk` directly.
 2. Install it on an arm64 Android 8.0+ phone, for example
-   `adb install ModelForge-2.1.0-arm64.apk`.
+   `adb install ModelForge-2.2.0-arm64.apk`.
 3. If an older development build is installed, uninstall it once. Older CI
    builds used an ephemeral debug certificate.
 4. Allow the notification permission when prompted so training controls are
