@@ -9,11 +9,15 @@ val ciKeystore = System.getenv("MF_KEYSTORE_PATH")
     ?.let { file(it) }
     ?.takeIf { it.exists() }
 
-val keystorePassword = System.getenv("MF_KEYSTORE_PASSWORD")
-val keyPassword = System.getenv("MF_KEY_PASSWORD")
+// Note: these are named differently from the SigningConfig properties on
+// purpose. Inside `create("ci") { ... }` the receiver's members shadow outer
+// names, so `keyPassword = keyPassword` would assign the config's own null
+// property to itself and produce an APK with no signing password.
+val mfKeystorePassword = System.getenv("MF_KEYSTORE_PASSWORD")
+val mfKeyPassword = System.getenv("MF_KEY_PASSWORD")
 val signingMaterialComplete = ciKeystore != null &&
-    !keystorePassword.isNullOrBlank() &&
-    !keyPassword.isNullOrBlank()
+    !mfKeystorePassword.isNullOrBlank() &&
+    !mfKeyPassword.isNullOrBlank()
 
 // A release must never be published unsigned. This check lives in Gradle so
 // it holds for every CI runner and every task graph, not only for one
@@ -59,9 +63,9 @@ android {
         if (signingMaterialComplete) {
             create("ci") {
                 storeFile = ciKeystore
-                storePassword = keystorePassword
+                storePassword = mfKeystorePassword
                 keyAlias = System.getenv("MF_KEY_ALIAS") ?: "modelforge"
-                keyPassword = keyPassword
+                keyPassword = mfKeyPassword
             }
         }
     }
