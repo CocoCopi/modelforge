@@ -922,10 +922,35 @@ safetensors exports.
   notice files are no longer stripped from the APK.
 - README updated for the new exports, download concurrency, weight range and
   the honest GGUF/llama.cpp limitation.
+- **Unsigned releases are now impossible from the build itself.** The Gradle
+  script refuses any release task when the keystore or its passwords are
+  missing, so the guarantee does not depend on one workflow file. CI run
+  44129900318 caught a real defect in the first version of this check: inside
+  `create("ci") { ... }` the receiver's `keyPassword` property shadowed the
+  outer value, so the signing config received a null key password. The outer
+  values were renamed and run 44132783459 is green.
 - The workflow gains a `pull_request` trigger, read-only default permissions,
   a separate release job whose secrets are scoped to that job, and a release
-  job that fails instead of publishing an unsigned APK. ONNX/TFLite/CoreML
-  exports remain unimplemented and are documented as such.
+  job that fails instead of publishing an unsigned APK. **This file is still
+  waiting to be pushed:** GitHub refuses workflow changes from an OAuth token
+  without the `workflow` scope, and the token in this environment carries
+  `repo`, `read:org` and `gist`. Authorising the scope (`gh auth refresh -h
+  github.com -s workflow`) or pushing from an account that has it completes the
+  change; it is prepared and committed locally.
+- ONNX/TFLite/CoreML exports remain unimplemented and are documented as such.
+
+### Release
+
+- v2.2.0 (`versionCode 13`), signed with the stable release key:
+  https://github.com/CocoCopi/modelforge/releases/tag/v2.2.0
+- `ModelForge-2.2.0-arm64.apk` (arm64-v8a, minSdk 26)
+- `ModelForge-2.2.0.aab`
+- APK SHA-256:
+  `e0dae4f37ff24b4c87dd2a1abd9223ace20bfe6455c23db18cb4edec3a59a9df`
+- AAB SHA-256:
+  `d7fda84cda3acfdffbeb7485ce9e44a718f5d8001e2637d4798b03bbd03d875f`
+- CI runs 44124950596 and 44132783459: host C++ tests, 95 JVM tests, Paparazzi,
+  debug APK, signed release APK/AAB and the x86_64 emulator job all green.
 
 Honest limitation: GGUF files produced here are archival/tooling containers,
 not llama.cpp-compatible models - ModelForge uses fixed sinusoidal positions
