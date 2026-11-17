@@ -70,8 +70,24 @@ class AiPlannerTest {
         assertEquals(32, plan.training.batchSize)
         assertEquals(32, plan.training.seqLength)
         assertEquals(1, plan.datasets.size)
-        assertEquals(99999, plan.datasets.first().rows)
-        assertEquals(5f, plan.datasets.first().weight, 1e-6f)
+        assertEquals(99999L, plan.datasets.first().rows)
+        // Weights are mixing multipliers, not percentages: 9x stays 9x.
+        assertEquals(9f, plan.datasets.first().weight, 1e-6f)
+    }
+
+    @Test
+    fun clamps_weights_to_the_supported_range() {
+        val plan = AiPlanner.sanitize(
+            AiPlan(
+                overview = "x",
+                datasets = listOf(
+                    AiDatasetSuggestion(datasetId = "owner/a", weight = 0.0001f),
+                    AiDatasetSuggestion(datasetId = "owner/b", weight = 5000f)
+                )
+            )
+        )
+        assertEquals(0.01f, plan.datasets[0].weight, 1e-6f)
+        assertEquals(1000f, plan.datasets[1].weight, 1e-6f)
     }
 
     @Test

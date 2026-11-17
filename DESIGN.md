@@ -91,8 +91,10 @@ All changing numbers use tabular figures (`FontFeatureSettings("tnum")`).
 
 - `RulerSlider`: log-scale horizontal ruler, decade ticks (1M, 10M, 100M...),
   draggable index mark, huge Fraunces count, haptic ticks at decades.
-- `BitGrainSelector`: stepped precision choices; each step shows a Canvas grain
-  pattern (fine for 32-bit, coarse for 2-bit) and the real estimated size.
+- `BitGrainSelector`: stepped precision choices (2/3/4/8-bit packed widths);
+  each step shows a Canvas grain pattern (fine for 8-bit, coarse for 2-bit) and
+  the real estimated size. F16/F32 are export choices in the GGUF and
+  safetensors menus, not packed-width choices.
 - `WizardRuler`: thin ruler along the top, one notch per step, current step in
   small caps ("STEP 04 / 14").
 - `LedgerChart`: hairline ink strokes, light grid, ember latest point, direct
