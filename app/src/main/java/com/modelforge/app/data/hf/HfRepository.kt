@@ -268,7 +268,7 @@ class HfRepository(
             }
         }
 
-        if (writtenRows == 0) {
+        if (writtenRows == 0L) {
             throw HfException(
                 "No text rows were available for $datasetId / $config / $split. " +
                     "Try another config, split or text column."

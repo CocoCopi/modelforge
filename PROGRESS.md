@@ -6,10 +6,14 @@ state of the CI run. Only measured facts belong here.
 ## Environment note
 
 - The `GITHUB_TOKEN` environment variable was **not set** in the build shell.
-- The pre-authenticated `gh` CLI was available for account **CocoCopi** with the
-  scopes `repo` and `workflow`. Its OAuth token was used through git's credential
-  helper and the REST API. The token was never printed, written to a file, or
-  committed.
+- The pre-authenticated `gh` CLI was available for account **CocoCopi**. Its
+  OAuth token was used through git's credential helper and the REST API. The
+  token was never printed, written to a file, or committed.
+- Scope note: the token currently carries `repo`, `read:org` and `gist`. GitHub
+  refuses pushes that modify `.github/workflows/**` without the `workflow`
+  scope, so the hardened workflow is committed locally and pushed once the
+  scope is granted; the branch was first pushed with the previous workflow
+  file so CI could start immediately.
 - Repository: https://github.com/CocoCopi/modelforge
 
 ## Phase 1 - skeleton, CI, hardware detection, config derivation
@@ -833,3 +837,96 @@ still uses the device sequence length (usually 128-256), and attention cost grow
 with tokens², so practical inference remains RAM- and time-limited. Audio,
 video, document and image trainers, NCM, the AI architecture runtime and full
 end-to-end quality gates remain open.
+
+## Production hardening - correctness, safety and interchange exports
+
+Status: IN PROGRESS - branch `production-hardening`, CI run 44110510350.
+
+Ten previously identified defects were addressed, and the app gained GGUF and
+safetensors exports.
+
+### Native engine (C++)
+
+- **Thread-pool race (P0).** The shared pool used one global completion flag and
+  captured the caller's stack frame by reference. Two threads entering
+  `parallel_for` at the same time reliably segfaulted; the repro harness is
+  `/tmp/opencode/thread_race.cpp`. `ThreadPool::run` now keeps all per-call
+  state in a heap `Call` object owned by `shared_ptr`, serializes whole
+  regions with `region_mu_` (a worker must never start a nested region),
+  captures and rethrows the first exception, and never lets a task escape the
+  worker loop. The original harness now reports `failures=0`.
+- **Input validation.** `tokens_in_range` / `targets_in_range` guard
+  `forward`, `train_step` and `PackedModel::forward`; invalid ids, empty
+  batches, oversized batches and sequences longer than the context fail closed
+  with `-1.0f` and clear the cache. `cross_entropy_loss` guards bad targets,
+  `backward` verifies the `dlogits` shape, and an inference-only forward clears
+  stale `dlogits`.
+- **Optimizer resume.** `adam_step_` is separate from `step_`. A weights-only
+  recovery file keeps the progress counter but restarts AdamW bias correction
+  from zero, because the moments were not saved.
+- **Configuration.** Untied embeddings are rejected in `ModelConfig::valid()`
+  and in the Kotlin `ModelConfig.isValid()`; the untied `v*d` head term was
+  removed from both parameter formulas.
+- **QAT/export alignment.** `set_qat` disables itself for widths it cannot
+  quantize instead of allocating a full fp32 copy, and `save_packed` exports
+  the QAT `fake_weight` when the model trained with quantization.
+- **Exports.** `GPT::save_gguf` writes GGUF v3 with `F32`, `F16`, `Q4_0` or
+  `Q8_0` tensors (1-D and non-32-divisible tensors fall back to F16) plus
+  `modelforge` metadata describing sinusoidal positions and LayerNorm.
+  `GPT::save_safetensors` writes a standard safetensors file with a contiguous
+  data section, F32 or F16, using the common Llama/PyTorch tensor names. Both
+  are exposed through JNI (`nativeSaveGguf`, `nativeSaveSafetensors`) and
+  `NativeModel`.
+- Host C++ suite is now 6/6 green: `test_config`, `test_grad`, `test_overfit`,
+  `test_packed`, `test_concurrent`, `test_export`.
+
+### Training service
+
+- All service commands are serialized through a `Channel<Command>` and one
+  command coroutine, so a stale run can never clobber a new run's flags.
+- Per-run `RunControl` holds `stopRequested`, `paused`, `autoPaused`,
+  `checkpointRequested` and `resumedWithRecovery`.
+- Starting a different model cancels and joins the previous job; cancellation
+  saves a checkpoint and is not reported as a failure.
+- Checkpoint recovery tries `recovery -> last -> best -> fresh`, skipping
+  unreadable files and files whose architecture does not match the manifest.
+- `TrainingRestartReceiver` honours `manifest.settings.autoResume`.
+- `Train again` on a finished model extends the run instead of doing nothing.
+
+### Data and UI
+
+- Row counts are `Long` end to end (manifest, download stats, AI suggestions,
+  wizard state). The wizard accepts any practical row count and the **Entire
+  split** action uses the real split size.
+- Mix weights accept 0.01x-1000x. The slider is a quick control; an exact text
+  field allows any positive multiplier.
+- Dataset cache files use UUIDs, so two downloads of the same dataset can never
+  collide. Partial files are deleted on failure, duplicate
+  dataset/config/split pairs are rejected, and a stale dataset response cannot
+  overwrite a newer selection.
+- Hugging Face page downloads run 12 pages (max 16) in parallel, still write
+  pages in order, and stop at the row count, split end or free-space guard.
+- The packed-estimate UI only reports sizes for 2/3/4/8-bit, the widths the
+  exporter actually implements. F16/F32 are export choices in the GGUF and
+  safetensors menus.
+- Home model cards and the training dashboard subscribe to `TrainingBus`; the
+  disk fallback is read on `Dispatchers.IO` instead of during composition.
+- Secure token writes use `commit()` and report failure. The UI no longer says
+  "Token saved securely" when the keystore was unavailable.
+
+### Repository and CI
+
+- Apache License 2.0 `LICENSE` and `NOTICE` added; dependency licence and
+  notice files are no longer stripped from the APK.
+- README updated for the new exports, download concurrency, weight range and
+  the honest GGUF/llama.cpp limitation.
+- The workflow gains a `pull_request` trigger, read-only default permissions,
+  a separate release job whose secrets are scoped to that job, and a release
+  job that fails instead of publishing an unsigned APK. ONNX/TFLite/CoreML
+  exports remain unimplemented and are documented as such.
+
+Honest limitation: GGUF files produced here are archival/tooling containers,
+not llama.cpp-compatible models - ModelForge uses fixed sinusoidal positions
+and LayerNorm while llama.cpp expects RoPE and RMSNorm. The container records
+this in its metadata instead of pretending the two are equivalent.
+

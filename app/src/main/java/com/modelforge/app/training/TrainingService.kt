@@ -132,15 +132,6 @@ class TrainingService : Service() {
         createChannel()
     }
 
-    override fun onDestroy() {
-        commands.close()
-        commandJob.cancel()
-        job?.cancel()
-        scope.cancel()
-        releaseWakeLock()
-        super.onDestroy()
-    }
-
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -994,6 +985,11 @@ class TrainingService : Service() {
         control.checkpointRequested = true
         val restart = store.activeModelId() != null && !control.stopRequested
         control.stopRequested = true
+        // Stop accepting commands, then tear the run down. The job's own
+        // cancellation handler saves a checkpoint.
+        commands.close()
+        commandJob.cancel()
+        job?.cancel()
         releaseWakeLock()
         scope.cancel()
         if (restart) {
