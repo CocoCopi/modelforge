@@ -959,8 +959,10 @@ this in its metadata instead of pretending the two are equivalent.
 
 ## Production release v2.3.0 - training speed, a stop that stops, dataset diversity
 
-Status: IN PROGRESS - host C++ suite 6/6 green; Kotlin/JVM tests and the signed
-build run in GitHub Actions.
+Status: DONE - CI run 44587657299 green (host C++ tests, JVM tests, Paparazzi,
+debug APK, signed release APK/AAB and the x86_64 emulator job). Released as
+v2.3.0 (`versionCode 14`):
+https://github.com/CocoCopi/modelforge/releases/tag/v2.3.0
 
 ### Reported problems
 
@@ -1065,4 +1067,20 @@ total compute estimate derived from the parameter count and the device's core
 count, and the app keeps reporting measured tokens/second and ETA during the
 run. A stopped run keeps the weights of the last completed step; the step that
 was interrupted is repeated when training is resumed.
+
+### Release
+
+- v2.3.0 (`versionCode 14`), signed with the stable release key (certificate
+  `9404779bafb23186d800e28cf0d4f6ad67fc95a15d613e000caaf53bc6b03490`, identical
+  to v2.2.0, so it updates over v2.2.0 without uninstalling):
+  https://github.com/CocoCopi/modelforge/releases/tag/v2.3.0
+- `ModelForge-2.3.0-arm64.apk` (arm64-v8a, minSdk 26, 3,574,627 bytes)
+- `ModelForge-2.3.0.aab` (5,409,147 bytes)
+- APK SHA-256:
+  `0a9cd688c08c4c5343e0c958984ff5e3bd09421339330f01fbc7c4f0122b6185`
+- AAB SHA-256:
+  `3ce4c7891a33e8d13d7bfcd08027c14e08fa158ffba148f1fedc3ced9d928fee`
+- CI runs 44585948630 and 44586556523 failed on two Kotlin compile errors that
+  are now fixed: the constructor parameter `app` is only in scope for property
+  initializers, and `@Volatile` was moved onto a member property.
 

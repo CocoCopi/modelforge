@@ -11,7 +11,7 @@ or a packed export and can share the packed file. Models can also be exported as
 **GGUF** (F32/F16/Q4_0/Q8_0) and **safetensors** (F32/F16) for tooling and
 archival.
 
-Status: v2.2.0 production build. The repository builds and tests on GitHub
+Status: v2.3.0 production build. The repository builds and tests on GitHub
 Actions and publishes a signed release APK/AAB. See
 [Honest limitations](#honest-limitations) before relying on model quality.
 
@@ -131,19 +131,20 @@ Licence: Apache License 2.0 (see `LICENSE` and `NOTICE`).
   position tables from those files are ignored in favour of the new sinusoidal
   positions.
 
-## Install (v2.2.0)
+## Install (v2.3.0)
 
 1. Open [Releases](https://github.com/CocoCopi/modelforge/releases) and download
-   the latest `ModelForge-2.2.0-arm64.apk` directly.
+   the latest `ModelForge-2.3.0-arm64.apk` directly.
 2. Install it on an arm64 Android 8.0+ phone, for example
-   `adb install ModelForge-2.2.0-arm64.apk`.
+   `adb install ModelForge-2.3.0-arm64.apk`.
 3. If an older development build is installed, uninstall it once. Older CI
    builds used an ephemeral debug certificate.
 4. Allow the notification permission when prompted so training controls are
    visible in the notification shade.
 
-The release APK is signed with the project's stable release key. The matching
-AAB is attached for store distribution. Updating from v2.0.0 or later keeps app data.
+The release APK is signed with the project's stable release key, so v2.3.0
+updates over v2.2.0 in place and keeps your models, datasets and checkpoints.
+The matching AAB is attached for store distribution.
 
 ### AI architect troubleshooting
 
@@ -251,6 +252,17 @@ Recorded from host builds in `PROGRESS.md`; they are not marketing estimates.
 
 The fp32 weights-only checkpoint for that model is about 289 KB, so the 4-bit
 export is roughly 4.3x smaller.
+
+## Release v2.3.0
+
+- `ModelForge-2.3.0-arm64.apk` (arm64-v8a, minSdk 26, 3,574,627 bytes)
+  SHA-256 `0a9cd688c08c4c5343e0c958984ff5e3bd09421339330f01fbc7c4f0122b6185`
+- `ModelForge-2.3.0.aab` (5,409,147 bytes)
+  SHA-256 `3ce4c7891a33e8d13d7bfcd08027c14e08fa158ffba148f1fedc3ced9d928fee`
+- Signed with the stable release key (certificate unchanged from v2.2.0), so it
+  updates in place.
+- CI run 44587657299 green: host C++ tests, JVM tests, Paparazzi, debug APK,
+  signed release APK/AAB and the x86_64 emulator job.
 
 ## Architecture
 
