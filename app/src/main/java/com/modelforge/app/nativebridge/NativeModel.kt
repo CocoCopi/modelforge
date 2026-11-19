@@ -12,7 +12,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock
  * lock only guards the native handle against being freed concurrently.
  */
 class NativeModel private constructor(
-    @Volatile private var handle: Long,
+    initialHandle: Long,
     var config: ModelConfig,
     var quantBits: Int,
     var quantGroup: Int
@@ -20,6 +20,9 @@ class NativeModel private constructor(
 
     /** Guards [handle] against [close] racing [requestStop]. */
     private val lifecycle = ReentrantReadWriteLock()
+
+    @Volatile
+    private var handle: Long = initialHandle
 
     val paramCount: Long
         @Synchronized get() = if (handle == 0L) 0L else NativeBridge.nativeParamCount(handle)
