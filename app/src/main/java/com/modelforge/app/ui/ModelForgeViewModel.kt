@@ -757,7 +757,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                     steps = steps,
                     batchSize = training.batchSize,
                     seqLength = seq,
-                    availableRamBytes = HardwareDetector.availableRamBytes(app)
+                    availableRamBytes = HardwareDetector.availableRamBytes(getApplication<Application>())
                 ),
                 error = null
             )
@@ -981,7 +981,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                     steps = steps,
                     batchSize = it.batchSize,
                     seqLength = it.seqLength,
-                    availableRamBytes = HardwareDetector.availableRamBytes(app)
+                    availableRamBytes = HardwareDetector.availableRamBytes(getApplication<Application>())
                 )
             )
         }
