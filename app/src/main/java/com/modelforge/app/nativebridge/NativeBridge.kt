@@ -40,6 +40,14 @@ object NativeBridge {
 
     external fun nativeStep(handle: Long): Long
 
+    /**
+     * Asks a running native step to abandon at the next layer boundary. Safe to
+     * call from another thread while [nativeTrainStep] is executing.
+     */
+    external fun nativeRequestStop(handle: Long)
+
+    external fun nativeClearStop(handle: Long)
+
     external fun nativeSetQAT(handle: Long, bits: Int, group: Int)
 
     external fun nativeGenerate(

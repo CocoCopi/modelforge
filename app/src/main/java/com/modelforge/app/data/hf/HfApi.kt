@@ -74,11 +74,12 @@ object HfClient {
     }
 
     fun create(tokenProvider: () -> String? = { null }): HfApiBundle {
-        // Dataset downloads run several page requests in parallel, so allow more
-        // than OkHttp's default five connections per host.
+        // Dataset downloads keep many page requests in flight, so the OkHttp
+        // dispatcher must be willing to run them concurrently instead of
+        // silently queueing most of them behind the default per-host limit.
         val dispatcher = Dispatcher().apply {
-            maxRequests = 32
-            maxRequestsPerHost = 16
+            maxRequests = 64
+            maxRequestsPerHost = 64
         }
         val client = OkHttpClient.Builder()
             .dispatcher(dispatcher)

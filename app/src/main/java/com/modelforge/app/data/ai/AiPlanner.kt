@@ -109,13 +109,20 @@ object AiPlanner {
         (AI-designed experimental architecture). The app currently downloads
         text datasets only; for image, audio, video or documents, recommend data
         but warn that native training for it is not built yet.
-        Choose training settings for quality, not speed. For models up to 10M
-        parameters prefer 800-1600 steps, batch 8-12, sequence 128-256 and a
-        learning rate of 8e-4 to 1e-3 when training_minutes allows. For 10-30M
-        use 500-1000 steps, batch 4-8 and 4e-4 to 6e-4. For larger models use
-        300-700 steps and 2e-4 to 4e-4. Use a warmup of 5-10% of steps. Dataset
-        ids must be real, public Hugging Face repositories with text columns;
-        do not invent ids. Return the final JSON promptly. Do not narrate or add
+        Choose training settings for quality, not the smallest recipe. There is
+        no maximum step count: the app accepts any positive number, so choose
+        as many steps as the work needs (for example 1,500-5,000 for models up
+        to 10M parameters when training_minutes allows, and 1,000-3,000 for
+        larger models). Keep the per-step token budget phone-friendly:
+        batch_size * seq_length should stay near or below 2,048 for models up
+        to 10M, 1,024 for 10-50M, and 512 for models above 50M, because every
+        step costs time on a phone. Use a warmup of 5-10% of steps.
+        Dataset ids must be real, public Hugging Face repositories with text
+        columns; do not invent ids. Never repeat the same dataset id: choose
+        distinct sources with complementary purposes (general language,
+        instruction, reasoning, tool calls, target language). If
+        current_datasets already contains a source, choose a different one.
+        Do not invent ids. Return the final JSON promptly. Do not narrate or add
         extra sections.
         JSON shape:
         {
@@ -183,7 +190,12 @@ object AiPlanner {
           the same suggestion.
         - Prefer permissive, commercial-use datasets. If the licence is unknown or
           non-commercial, set commercial_use false and warn about it.
-        - Choose 3-6 complementary datasets and quality-focused training settings.
+        - Choose 3-6 complementary datasets that are all different: never repeat
+          a dataset id inside the plan or reuse one already in current_datasets.
+          Cover at least general language and instruction data when they fit.
+        - Keep the per-step token budget small for big models:
+          batch_size * seq_length <= 2048 for <=10M parameters, <=1024 for
+          10-50M, and <=512 for >50M. There is no maximum step count.
         - Keep the final plan compact. The JSON plan shape is:
         {
           "overview": "plain-language overview with an analogy",
@@ -425,19 +437,22 @@ object AiPlanner {
     fun sanitize(plan: AiPlan): AiPlan {
         val training = plan.training.copy(
             steps = plan.training.steps.coerceAtLeast(1),
-            batchSize = plan.training.batchSize.coerceIn(1, 32),
-            seqLength = plan.training.seqLength.coerceIn(32, 1024),
+            batchSize = plan.training.batchSize.coerceIn(1, 64),
+            seqLength = plan.training.seqLength.coerceIn(32, 4096),
             learningRate = plan.training.learningRate.coerceIn(1e-5f, 1e-2f),
-            warmupSteps = plan.training.warmupSteps.coerceIn(1, 400)
+            warmupSteps = plan.training.warmupSteps
+                .coerceIn(1, plan.training.steps.coerceAtLeast(1))
         )
+        // One source should appear at most once. Two configs of the same
+        // dataset are not "complementary data"; the old dedupe key allowed the
+        // same repository to fill several slots.
         val seen = HashSet<String>()
         val datasets = plan.datasets.mapNotNull { item ->
             val id = item.datasetId.trim()
             val columns = item.columns.map { it.trim() }.filter { it.isNotBlank() }
             val config = item.config.trim().ifBlank { "default" }
             val split = item.split.trim().ifBlank { "train" }
-            val key = "$id|$config|$split"
-            if (id.isBlank() || !seen.add(key)) return@mapNotNull null
+            if (id.isBlank() || !seen.add(id.lowercase())) return@mapNotNull null
             item.copy(
                 datasetId = id,
                 purpose = item.purpose.trim().ifBlank { "general" },

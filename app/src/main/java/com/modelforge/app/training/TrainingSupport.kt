@@ -151,7 +151,7 @@ data class TokenCacheManifest(
 object TokenCache {
     private const val MAGIC = 0x4D46544B
     private const val VERSION = 1
-    private const val MAX_TOKENS = 20_000_000
+    private const val MAX_TOKENS = 64_000_000
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     fun signature(

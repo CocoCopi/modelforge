@@ -77,7 +77,14 @@ class TrainingService : Service() {
             // while training, so these actions only need to reach a live run.
             if (ModelStore(context).activeModelId() == null) return
             val intent = Intent(context, TrainingService::class.java).setAction(action)
-            runCatching { ContextCompat.startForegroundService(context, intent) }
+            // The service is already running, so a plain start is accepted
+            // even when the app is in the background (the notification action).
+            // startForegroundService is only the fallback for a service that
+            // is not running yet.
+            val delivered = runCatching { context.startService(intent) }.isSuccess
+            if (!delivered) {
+                runCatching { ContextCompat.startForegroundService(context, intent) }
+            }
         }
     }
 
@@ -106,6 +113,13 @@ class TrainingService : Service() {
     private var modelName: String = ""
     @Volatile private var currentState: TrainingLiveState? = null
     private var control = RunControl(extend = false)
+
+    /**
+     * The model owned by the current run. Stop reaches through this to abort a
+     * native step that is already executing; it is cleared before the model is
+     * freed.
+     */
+    @Volatile private var stopTarget: NativeModel? = null
 
     private var lastNotifyAt = 0L
     private var lastPersistAt = 0L
@@ -151,9 +165,22 @@ class TrainingService : Service() {
             }
             null -> {
                 val active = store.activeModelId()
-                if (active != null && store.loadManifest(active)?.settings?.autoResume != false) {
+                val live = active?.let { store.loadLiveState(it) }
+                // A process restart must resume an interrupted run, but it must
+                // never resurrect a run the user stopped (or one that already
+                // finished or failed). The stop path clears the active marker,
+                // and this guard covers a marker left behind by a crash.
+                val terminal = live != null && (
+                    live.status == TrainingStatus.COMPLETED ||
+                        live.status == TrainingStatus.STOPPED ||
+                        live.status == TrainingStatus.ERROR
+                    )
+                if (active != null && !terminal &&
+                    store.loadManifest(active)?.settings?.autoResume != false
+                ) {
                     commands.trySend(Command.Start(active, false))
                 } else {
+                    if (active != null && terminal) store.setActive(active, false)
                     stopSelf()
                 }
             }
@@ -166,6 +193,9 @@ class TrainingService : Service() {
         if (existing?.isActive == true) {
             if (currentModelId == command.modelId) return
             control.stopRequested = true
+            // Abort the old native step before waiting for the job to unwind,
+            // otherwise switching models can block for a whole step.
+            stopTarget?.requestStop()
             existing.cancelAndJoin()
         }
         val manifest = store.loadManifest(command.modelId)
@@ -235,9 +265,23 @@ class TrainingService : Service() {
         control.stopRequested = true
         control.paused = false
         control.autoPaused = false
+        // Reach into the native engine right away. A big model can spend tens
+        // of seconds inside a single step, so waiting for the loop to notice
+        // the flag is what made "Stopping…" look like a permanent hang. The
+        // engine aborts before AdamW, so the last checkpoint's weights stay
+        // consistent.
+        stopTarget?.requestStop()
+        // Drop the active marker now rather than in finish(): if the process
+        // dies while the final checkpoint is being written, the next launch
+        // must not auto-resume a run the user stopped.
+        currentModelId?.let { store.setActive(it, false) }
         currentState?.let { state ->
             publishState(
-                state.copy(message = "Stopping and saving a checkpoint…", updatedAt = System.currentTimeMillis()),
+                state.copy(
+                    status = TrainingStatus.STOPPED,
+                    message = "Stopping now. Saving the latest weights…",
+                    updatedAt = System.currentTimeMillis()
+                ),
                 persist = true,
                 forceNotify = true
             )
@@ -280,7 +324,16 @@ class TrainingService : Service() {
             }
 
             val dataDir = store.dataDir(modelId)
-            val corpusCap = settings.corpusChars.coerceIn(10_000, 4_000_000)
+            // The old 4M-character clamp silently discarded most of a large
+            // dataset, so every epoch replayed the same small slice. Scale the
+            // budget to the step count and to available RAM instead.
+            val corpusCap = CorpusBudget.resolve(
+                requested = settings.corpusChars,
+                steps = totalSteps,
+                batchSize = settings.batchSize,
+                seqLength = seq,
+                availableRamBytes = HardwareDetector.availableRamBytes(this)
+            )
             val identityBudget = if (manifest.creator.isNotBlank()) {
                 IdentityDataGenerator.estimateIdentityFraction(
                     corpusCap,
@@ -296,6 +349,7 @@ class TrainingService : Service() {
                     (corpusCap - identityBudget - 2).coerceAtLeast(8_000)
                 )
             }
+            if (run.stopRequested) throw TrainingStopped()
             if (corpus.text.isBlank()) {
                 throw TrainingFailure(
                     "The cached dataset text is empty.",
@@ -324,13 +378,15 @@ class TrainingService : Service() {
             )
             publishState(state, persist = false, forceNotify = true)
 
-            val tokenizer = loadOrTrainTokenizer(manifest, trainingText)
+            val tokenizer = loadOrTrainTokenizer(manifest, trainingText, corpusCap)
+            if (run.stopRequested) throw TrainingStopped()
             state = state.copy(message = "Tokenizing dataset…")
             publishState(state, persist = false, forceNotify = true)
 
             val tokens = withContext(Dispatchers.Default) {
                 getOrBuildTokens(manifest, tokenizer, trainingText, state)
             }
+            if (run.stopRequested) throw TrainingStopped()
             if (tokens.size < seq + 2) {
                 throw TrainingFailure(
                     "Not enough text for a sequence of $seq tokens (${tokens.size} tokens).",
@@ -350,6 +406,11 @@ class TrainingService : Service() {
 
             var memoryMessage: String? = null
             model = openModel(manifest, run)
+            // A fresh engine must not inherit a stop that was meant for the
+            // previous run (for example after switching models).
+            model!!.clearStop()
+            stopTarget = model
+            if (run.stopRequested) throw TrainingStopped()
             var step = model!!.step.toInt().coerceAtLeast(0)
             if (run.resumedWithRecovery && step > 0) {
                 memoryMessage = "Recovered the latest weights from step $step after the app " +
@@ -481,6 +542,13 @@ class TrainingService : Service() {
                 val loss = model!!.trainStep(inputTokens, targetTokens, batch, seq, lr, settings.weightDecay)
                 val seconds = (System.nanoTime() - t0) / 1_000_000_000.0
 
+                if (loss == NativeModel.STOPPED) {
+                    // The engine unwound mid-step at our request. AdamW did not
+                    // run, so the weights still match the last checkpoint.
+                    run.stopRequested = true
+                    break
+                }
+
                 if (!loss.isFinite() || loss < 0f) {
                     val oldBatch = batch
                     batch /= 2
@@ -493,6 +561,8 @@ class TrainingService : Service() {
                     }
                     model!!.close()
                     model = openModel(manifest, run)
+                    model!!.clearStop()
+                    stopTarget = model
                     step = model!!.step.toInt().coerceAtLeast(0)
                     memoryMessage = "Low memory: batch size lowered from $oldBatch to $batch. " +
                         "Training resumed from step $step."
@@ -597,6 +667,15 @@ class TrainingService : Service() {
                 model?.takeIf { it.isOpen }?.saveCheckpoint(path, true)
             }
             throw cancel
+        } catch (stopped: TrainingStopped) {
+            // The user stopped during preparation, before the step loop ran.
+            val last = currentState ?: TrainingLiveState(modelId, TrainingStatus.STOPPED)
+            finish(
+                modelId,
+                TrainingStatus.STOPPED,
+                "Training stopped before the first step. No checkpoint was changed.",
+                last
+            )
         } catch (t: TrainingFailure) {
             fail(modelId, t.message ?: "Training failed.", t.suggestion)
         } catch (t: Throwable) {
@@ -607,12 +686,17 @@ class TrainingService : Service() {
                 "Try again. If this repeats, close other apps, lower the batch size or create a smaller model."
             )
         } finally {
+            stopTarget = null
             runCatching { model?.close() }
             releaseWakeLock()
         }
     }
 
-    private suspend fun loadOrTrainTokenizer(manifest: ModelManifest, corpus: String): BpeTokenizer {
+    private suspend fun loadOrTrainTokenizer(
+        manifest: ModelManifest,
+        corpus: String,
+        corpusCap: Int
+    ): BpeTokenizer {
         val file = store.tokenizerFile(manifest.id)
         if (file.exists()) {
             val loaded = runCatching { BpeTokenizer.load(file) }.getOrNull()
@@ -624,7 +708,7 @@ class TrainingService : Service() {
             BpeTokenizer.train(
                 corpus,
                 manifest.config.vocabSize,
-                maxTrainingChars = min(corpus.length, manifest.settings.corpusChars)
+                maxTrainingChars = min(corpus.length, corpusCap)
             ) { done, total ->
                 if (done % 100 == 0 || done == total) {
                     val now = System.currentTimeMillis()
@@ -985,6 +1069,9 @@ class TrainingService : Service() {
         control.checkpointRequested = true
         val restart = store.activeModelId() != null && !control.stopRequested
         control.stopRequested = true
+        // Unblock a step that is currently executing so the job can cancel and
+        // save promptly instead of running to completion.
+        stopTarget?.requestStop()
         // Stop accepting commands, then tear the run down. The job's own
         // cancellation handler saves a checkpoint.
         commands.close()
@@ -1012,3 +1099,6 @@ private fun formatDuration(seconds: Long): String {
 }
 
 private class TrainingFailure(message: String, val suggestion: String? = null) : Exception(message)
+
+/** Signals a cooperative stop requested by the user, not a failure. */
+private class TrainingStopped : Exception()

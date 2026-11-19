@@ -5,7 +5,8 @@ import com.modelforge.app.data.hf.DatasetStructure
 data class ResolvedAiDataset(
     val config: String,
     val split: String,
-    val columns: List<String>
+    val columns: List<String>,
+    val totalRows: Long = 0L
 )
 
 private val contentWords = listOf(
@@ -42,7 +43,8 @@ object AiDatasetResolver {
         return ResolvedAiDataset(
             config = config.name,
             split = split,
-            columns = columns
+            columns = columns,
+            totalRows = config.splitRows[split] ?: 0L
         )
     }
 }

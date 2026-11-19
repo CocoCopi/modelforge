@@ -110,6 +110,20 @@ Java_com_modelforge_app_nativebridge_NativeBridge_nativeTrainStep(
     }
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_modelforge_app_nativebridge_NativeBridge_nativeRequestStop(
+    JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
+    GPT* m = from_handle(handle);
+    if (m) m->request_stop();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_modelforge_app_nativebridge_NativeBridge_nativeClearStop(
+    JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
+    GPT* m = from_handle(handle);
+    if (m) m->clear_stop();
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_modelforge_app_nativebridge_NativeBridge_nativeStep(JNIEnv* /*env*/, jobject /*thiz*/,
                                                              jlong handle) {

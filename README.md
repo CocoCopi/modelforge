@@ -23,25 +23,45 @@ Licence: Apache License 2.0 (see `LICENSE` and `NOTICE`).
   5% of a requested parameter target, capped by measured RAM/CPU limits.
 - **From-scratch C++ engine** - LayerNorm, causal multi-head attention,
   tanh-GELU MLP, tied embeddings, manual backprop, AdamW, NEON dot products and
-  a persistent thread pool. JNI handles are serialized and always freed.
+  a persistent thread pool. The three matrix-multiply kernels are tiled and
+  vectorized (output/row blocking for the forward pass, contiguous blocked
+  accumulation for the weight gradients), and the NEON dot product uses four
+  independent accumulators so the FMA pipeline is not latency-bound. JNI
+  handles are serialized and always freed.
 - **Real training service** - foreground service with progress notification,
   pause/resume/stop actions, partial wake lock, battery/thermal auto-pause and
   auto-resume, boot resume, and atomic checkpoints. `last.mfck` keeps AdamW
   state for exact resume; `best.mfck` is weights-only for export. Training
   keeps running in the background until you stop it, and the service serializes
   every command so a stale run can never clobber a new one.
+- **Stop that actually stops** - the stop action reaches into the running
+  native step and aborts it at the next layer boundary instead of waiting for
+  the step to finish, so a large model stops in seconds rather than minutes.
+  The aborted step never reaches AdamW, so the saved weights stay consistent
+  with the last checkpoint. Stopping also clears the active marker immediately,
+  so a stopped run is never auto-resumed when the app is reopened.
 - **Hugging Face datasets** - search, config/split/text-column discovery,
   exact split sizes, license warnings, row/byte progress, weighted mixing,
   tokenizer training and a token-id cache. The row field has no 5,000-row cap:
-  enter any count or use **Entire split**. Downloads fetch up to twelve 100-row
-  pages in parallel with no artificial page delay and stop at the split end or
-  the free-space guard.
+  enter any count or use **Entire split**. Downloads keep up to 24 page
+  requests in flight (64 maximum) with no artificial page delay, write pages in
+  order and stop at the split end or the free-space guard.
+- **Corpus sized to the run** - the amount of text loaded into memory is
+  derived from the step count and the free RAM (up to 128M characters) instead
+  of a fixed 4M-character clamp, so a long run no longer replays the same few
+  thousand rows every epoch.
 - **Up to 1,000,000-token context** - a logarithmic slider spans 128 to 1M
   tokens with quick presets. Positions use fixed sinusoidal values, so context
   length adds no parameters and no context-sized position table.
 - **User-set training steps** - enter an exact optimizer step count, choose a
-  preset, or let the AI architect propose one. Steps are no longer clamped to a
-  100-2,000 range.
+  preset, or let the AI architect propose one. There is no maximum step count,
+  and the review screen shows the estimated seconds per step and the total
+  on-device compute for the chosen size before training starts.
+- **AI dataset diversity** - the architect is told to pick distinct,
+  complementary repositories, and the app enforces it: repeated dataset ids are
+  collapsed, fewer than three distinct sources are topped up with verified
+  complementary datasets, and each AI-chosen dataset is retried three times
+  automatically before a visible **Retry N failed dataset(s)** button appears.
 - **Quantization-aware training (QAT)** - symmetric per-group 32 fake
   quantization with straight-through estimation on linear layers only.
 - **Packed deployment format** - `MFPK` file with fp32 embeddings/norms/biases/
@@ -94,7 +114,9 @@ Licence: Apache License 2.0 (see `LICENSE` and `NOTICE`).
 - ONNX, TensorFlow Lite and CoreML exports are **not** implemented. The app
   does not pretend to write them.
 - Training time and memory vary a lot by phone. The app reports measured
-  tokens/second, RAM and an ETA instead of guessing.
+  tokens/second, RAM and an ETA instead of guessing, and the review screen
+  shows an approximate per-step and total compute estimate derived from the
+  model size and the device's core count.
 - The Compose screens are compiled into the release APK. CI now launches them
   on an x86_64 emulator and opens Diagnostics; physical-device coverage is still
   needed for phone-specific performance and thermal behaviour. Native engine
@@ -207,6 +229,18 @@ Recorded from host builds in `PROGRESS.md`; they are not marketing estimates.
   greedy generation after checkpoint reload is identical.
 - Optimizer resume: continues at step 601 and reproduces the reference loss
   exactly (`0.000635` vs `0.000635`).
+- Training step time on an aarch64 Cortex-A55 host (4 usable cores, 256
+  tokens per step, `batch 2 x seq 128`):
+
+  | Model | Parameters | Before | After |
+  | --- | ---: | ---: | ---: |
+  | 4 layers, d=128 | 1.06M | 1.15 s/step | 0.54 s/step |
+  | 15 layers, d=768 | 112.6M | 205 s/step | 14.6 s/step |
+
+  The forward and backward matrix multiplies were the bottleneck: the old
+  gradient kernels walked both operands with a stride and could not vectorize.
+  They are now blocked and contiguous, and the NEON dot product uses four
+  independent accumulators.
 - Packed test model (64-wide, 2 layers):
 
 | Bits | Packed size | Max logit difference | Argmax mismatches |

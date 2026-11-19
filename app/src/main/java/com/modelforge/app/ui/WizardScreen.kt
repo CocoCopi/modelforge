@@ -342,7 +342,7 @@ private fun TrainingTimeStep(vm: ModelForgeViewModel, state: WizardState) {
             modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            listOf(100, 500, 1_000, 5_000, 10_000, 50_000).forEach { steps ->
+            listOf(100, 500, 1_000, 5_000, 10_000, 50_000, 100_000).forEach { steps ->
                 Choice(
                     text = formatRows(steps.toLong()),
                     selected = state.steps == steps,
@@ -351,8 +351,10 @@ private fun TrainingTimeStep(vm: ModelForgeViewModel, state: WizardState) {
             }
         }
         Text(
-            "Training runs exactly the number of steps you enter. More steps can improve a small " +
-                "model, but each one costs time and battery; pause and resume from Home whenever you need.",
+            "Training runs exactly the number of steps you enter. There is no maximum: a step " +
+                "simply continues from the saved checkpoint, so you can pick small numbers for a " +
+                "quick run or large ones for a long project. More steps can improve a small model, " +
+                "but each one costs time and battery; pause and resume from Home whenever you need.",
             style = MaterialTheme.typography.bodySmall,
             color = ForgeColors.inkMuted
         )
@@ -413,9 +415,14 @@ private fun AiPlanStep(vm: ModelForgeViewModel, state: WizardState) {
         ai.error?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = ForgeColors.error)
         }
-        if (!ai.busy && ai.plan != null && ai.error != null) {
+        if (!ai.busy && ai.plan != null && (ai.failedDatasets.isNotEmpty() || ai.error != null)) {
+            val label = when {
+                ai.failedDatasets.isNotEmpty() ->
+                    "Retry ${ai.failedDatasets.size} failed dataset(s)"
+                else -> "Retry dataset downloads"
+            }
             ForgeOutlineButton(
-                "Retry dataset downloads",
+                label,
                 onClick = vm::retryAiDatasets,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -1145,6 +1152,29 @@ private fun ReviewStep(vm: ModelForgeViewModel, state: WizardState) {
         LedgerStat("tool calls", if (state.toolCalling) "on" else "off")
         LedgerStat("compression", "${state.bits}-bit")
         LedgerStat("steps", state.steps.toString())
+        val trainingSeq = minOf(
+            state.seqLength,
+            state.contextChoice.takeIf { it > 0 } ?: config?.contextLength ?: state.seqLength
+        ).coerceAtLeast(1)
+        val tokensPerStep = (state.batchSize.toLong() * trainingSeq.toLong()).coerceAtLeast(1L)
+        val params = config?.paramCount() ?: 0L
+        val coreFactor = (4.0 / vm.hardware.cpuCores.coerceIn(1, 8)).coerceIn(0.5, 4.0)
+        val secondsPerStep = params.toDouble() * tokensPerStep.toDouble() * 2.9e-9 * coreFactor
+        val totalCompute = secondsPerStep * state.steps.toDouble()
+        if (params > 0L) {
+            LedgerStat("tokens / step", formatRows(tokensPerStep))
+            LedgerStat("on-device estimate", "${formatSpan(secondsPerStep)} / step")
+            LedgerStat("total compute", "≈ ${formatSpan(totalCompute)}")
+            if (secondsPerStep > 10.0) {
+                Text(
+                    "Each step is expected to take about ${formatSpan(secondsPerStep)} on this " +
+                        "device because the model is large. Lower batch size or sequence length if " +
+                        "you want loss updates more often; the estimate is approximate and devices vary.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ForgeColors.ochreInk
+                )
+            }
+        }
         LedgerStat("datasets", state.datasets.size.toString())
         if (state.persona.isNotBlank()) {
             Hairline()
@@ -1400,3 +1430,13 @@ private fun formatContext(tokens: Int): String = when {
 
 private fun formatMinutes(minutes: Int): String =
     if (minutes < 60) "$minutes min" else "${minutes / 60} h ${minutes % 60} min".replace(" 0 min", "")
+
+private fun formatSpan(seconds: Double): String {
+    if (!seconds.isFinite() || seconds <= 0.0) return "—"
+    return when {
+        seconds < 1.0 -> String.format(Locale.US, "%.1f s", seconds)
+        seconds < 90.0 -> String.format(Locale.US, "%.0f s", seconds)
+        seconds < 5_400.0 -> String.format(Locale.US, "%.0f min", seconds / 60.0)
+        else -> String.format(Locale.US, "%.1f h", seconds / 3_600.0)
+    }
+}

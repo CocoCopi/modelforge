@@ -159,6 +159,35 @@ int main() {
         std::remove(path);
     }
 
+    // 5. request_stop is cooperative: train_step reports kStopped, does not
+    //    advance the optimizer, and leaves the weights byte-for-byte identical.
+    {
+        GPT model;
+        check(model.init(small_config(), 23), "stop model init");
+        std::vector<int> tokens(kN), targets(kN);
+        fill_batch(tokens.data(), targets.data(), kN, 256);
+
+        const float first = model.train_step(tokens.data(), targets.data(), kB, kT, 1e-3f);
+        check(first >= 0.0f, "step before stop succeeded");
+
+        std::vector<float> before;
+        for (Param* p : model.params()) before.insert(before.end(), p->w.begin(), p->w.end());
+
+        model.request_stop();
+        const float stopped = model.train_step(tokens.data(), targets.data(), kB, kT, 1e-3f);
+        check(stopped == GPT::kStopped, "train_step reports the requested stop");
+        check(model.step() == 1, "a stopped step does not advance the counter");
+
+        std::vector<float> after;
+        for (Param* p : model.params()) after.insert(after.end(), p->w.begin(), p->w.end());
+        check(before == after, "a stopped step leaves the weights unchanged");
+
+        model.clear_stop();
+        const float resumed = model.train_step(tokens.data(), targets.data(), kB, kT, 1e-3f);
+        check(resumed >= 0.0f && std::isfinite(resumed), "training resumes after clear_stop");
+        check(model.step() == 2, "the resumed step advances the counter");
+    }
+
     if (failures == 0) std::printf("all concurrency/validation tests passed\n");
     return failures == 0 ? 0 : 1;
 }

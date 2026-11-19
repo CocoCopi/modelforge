@@ -957,3 +957,112 @@ not llama.cpp-compatible models - ModelForge uses fixed sinusoidal positions
 and LayerNorm while llama.cpp expects RoPE and RMSNorm. The container records
 this in its metadata instead of pretending the two are equivalent.
 
+## Production release v2.3.0 - training speed, a stop that stops, dataset diversity
+
+Status: IN PROGRESS - host C++ suite 6/6 green; Kotlin/JVM tests and the signed
+build run in GitHub Actions.
+
+### Reported problems
+
+- A 50M-parameter model trained at roughly one hour per step on v2.2.0.
+- Pressing **Stop training** showed "stopping and saving checkpoint" forever
+  and the run restarted by itself when the app was reopened.
+
+### Native engine (C++)
+
+The matrix multiplies, not the configuration, were the bottleneck. The three
+kernels were rewritten:
+
+- `matmul_nt_raw` now tiles the output and row dimensions, so a block of
+  weights stays resident while it is reused instead of re-reading the whole
+  weight matrix for every token.
+- `matmul_dw_add` accumulates a block of output rows in a contiguous
+  thread-local buffer. The old triple loop walked both operands with a stride
+  and could not vectorize at all.
+- `matmul_dx_add` processes a block of rows at a time and keeps the inner loop
+  over the input dimension contiguous.
+- `dot_f32` uses four independent NEON accumulators. A single FMA chain stalls
+  on its own latency on an A55, which cost about 1.8x on the dot product alone.
+
+Measured on the aarch64 Cortex-A55 host (4 usable cores, `batch 2 x seq 128`,
+256 tokens per step), old kernels versus new kernels in the same session:
+
+| Model | Parameters | Before | After | Speed-up |
+| --- | ---: | ---: | ---: | ---: |
+| 4 layers, d=128 | 1.06M | 1.15 s/step | 0.54 s/step | 2.1x |
+| 15 layers, d=768 | 112.6M | 205 s/step | 14.6 s/step | 14x |
+
+The 112M model previously exceeded a 280-second timeout in this harness. The
+profile that guided the rewrite showed backward was nine times slower than
+forward (3.2 s vs 0.35 s on the 1M model) before the gradient kernels were
+fixed.
+
+### Stop that stops
+
+- `GPT` gained an atomic stop flag. `forward_logits` and `backward` check it
+  at every layer boundary, and `train_step` returns the new `kStopped`
+  sentinel (`-2.0f`) instead of a loss.
+- The abort happens before AdamW, so the weights still match the last
+  checkpoint. A native test asserts this: the parameter vectors are
+  byte-for-byte identical after a stopped step and the step counter does not
+  advance.
+- `NativeBridge.nativeRequestStop` / `nativeClearStop` and
+  `NativeModel.requestStop()` expose it to Kotlin. `requestStop` deliberately
+  does not take the per-model monitor, because the monitor is held by the
+  running step; a read/write lock only protects the native handle from being
+  freed while the stop request is in flight.
+- `TrainingService` keeps a `stopTarget` for the current run. The stop command
+  calls `requestStop()` immediately, so a 15-second step is abandoned within a
+  layer or two instead of after the full step.
+- The stop command also clears the active marker (`store.setActive(id,
+  false)`) at once. Previously the marker was only cleared in `finish()`, so a
+  process kill during the final checkpoint write left the model active and the
+  next launch auto-resumed the run the user had just stopped.
+- `onStartCommand(null)` now refuses to restart a run whose persisted state is
+  `STOPPED`, `COMPLETED` or `ERROR`, even if an active marker survived a
+  crash.
+- Stopping during preparation (corpus build, tokenizer training, tokenization)
+  is also detected and reports a clean `STOPPED` state instead of continuing
+  into the first step.
+
+### Corpus budget
+
+The training corpus was clamped to 4,000,000 characters, which silently threw
+away most of a 132k-row dataset and made every epoch replay the same few
+thousand rows. `CorpusBudget` now derives the budget from the step count and
+the free RAM (ceiling 128M characters, minimum 200k) and is used by the
+training service, the wizard, the AI plan and `TrainingSettings.autoFor`. The
+token cache limit was raised from 20M to 64M tokens to match.
+
+### Datasets
+
+- `HfRepository.downloadText` is now a sliding window: up to 24 page requests
+  are in flight at all times (64 maximum), the next page is requested while the
+  current one is written to disk, and pages are still written in order. The
+  OkHttp dispatcher allows 64 requests per host.
+- The known split size is passed in, so the download stops at the real end of
+  the split instead of probing past it.
+- Each AI-chosen dataset is retried three times automatically. Whatever still
+  fails is listed with a visible **Retry N failed dataset(s)** button that
+  retries only the failed ids.
+- The AI prompt now requires distinct, complementary dataset ids, and
+  `AiPlanner.sanitize` collapses repeated ids instead of treating two configs
+  of one repository as separate sources. When fewer than three distinct
+  sources were downloaded, verified complementary datasets are added.
+
+### Tests
+
+- `test_concurrent` gained a stop test: a requested stop returns `kStopped`,
+  does not advance the step counter and leaves every parameter unchanged.
+- `AiPlannerTest` covers long runs (50,000 steps) and one-entry-per-dataset-id
+  deduplication.
+- `CorpusBudgetTest` covers step-driven growth, the RAM ceiling and the
+  minimum.
+
+Honest limitation: the step-time numbers above come from this aarch64 host,
+not from the phone. The review screen now shows an approximate per-step and
+total compute estimate derived from the parameter count and the device's core
+count, and the app keeps reporting measured tokens/second and ETA during the
+run. A stopped run keeps the weights of the last completed step; the step that
+was interrupted is repeated when training is resumed.
+

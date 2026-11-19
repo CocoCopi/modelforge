@@ -39,7 +39,7 @@ class AiPlannerTest {
         assertTrue(user.contains("inputs: Text"))
         assertTrue(user.contains("reasoning: true"))
         assertTrue(system.contains("most fluent"))
-        assertTrue(system.contains("800-1600 steps"))
+        assertTrue(system.contains("no maximum step count"))
         assertTrue(system.contains("do not invent ids"))
     }
 
@@ -67,7 +67,7 @@ class AiPlannerTest {
         val plan = AiPlanner.parse(raw)
         assertEquals("A tiny kite model.", plan.overview)
         assertEquals(9000, plan.training.steps)
-        assertEquals(32, plan.training.batchSize)
+        assertEquals(64, plan.training.batchSize)
         assertEquals(32, plan.training.seqLength)
         assertEquals(1, plan.datasets.size)
         assertEquals(99999L, plan.datasets.first().rows)
@@ -91,7 +91,7 @@ class AiPlannerTest {
     }
 
     @Test
-    fun keeps_the_same_dataset_id_when_configs_differ() {
+    fun collapses_the_same_dataset_id_to_one_complementary_source() {
         val plan = AiPlanner.sanitize(
             AiPlan(
                 overview = "x",
@@ -101,7 +101,7 @@ class AiPlannerTest {
                 )
             )
         )
-        assertEquals(2, plan.datasets.size)
+        assertEquals(1, plan.datasets.size)
     }
 
     @Test
@@ -210,16 +210,29 @@ class AiDatasetResolverTest {
 
 class AiPlanDeduplicationTest {
     @Test
-    fun keeps_the_same_dataset_with_different_configs() {
+    fun keeps_one_entry_per_dataset_id_regardless_of_config() {
         val plan = AiPlanner.sanitize(
             AiPlan(
                 datasets = listOf(
                     AiDatasetSuggestion(datasetId = "owner/data", config = "english", split = "train"),
-                    AiDatasetSuggestion(datasetId = "owner/data", config = "tamil", split = "train")
+                    AiDatasetSuggestion(datasetId = "owner/data", config = "tamil", split = "train"),
+                    AiDatasetSuggestion(datasetId = "owner/other", config = "default", split = "train")
                 )
             )
         )
-        assertEquals(2, plan.datasets.size)
+        assertEquals(
+            listOf("owner/data", "owner/other"),
+            plan.datasets.map { it.datasetId }
+        )
+    }
+
+    @Test
+    fun accepts_long_runs_without_an_artificial_step_ceiling() {
+        val plan = AiPlanner.sanitize(
+            AiPlan(training = AiTrainingPlan(steps = 50_000, warmupSteps = 2_500))
+        )
+        assertEquals(50_000, plan.training.steps)
+        assertEquals(2_500, plan.training.warmupSteps)
     }
 }
 

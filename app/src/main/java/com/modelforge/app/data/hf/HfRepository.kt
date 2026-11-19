@@ -2,7 +2,6 @@ package com.modelforge.app.data.hf
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -179,92 +178,125 @@ class HfRepository(
         maxBytes: Long,
         destination: File,
         pageSize: Int = 100,
-        concurrency: Int = 12,
+        concurrency: Int = 24,
+        knownTotalRows: Long = 0L,
         onProgress: (DownloadStats) -> Unit = {}
     ): DownloadStats = withContext(Dispatchers.IO) {
         destination.parentFile?.mkdirs()
-        var offset = 0L
         var writtenRows = 0L
         var writtenBytes = 0L
         val preview = StringBuilder()
-        var totalRows = Long.MAX_VALUE
+        var totalRows = if (knownTotalRows > 0L) knownTotalRows else Long.MAX_VALUE
         // The datasets-server caps length at 100 rows per page, so the only
-        // remaining lever is how many pages are in flight at once.
-        val workers = concurrency.coerceIn(1, 16)
+        // remaining levers are how many pages are in flight and how well the
+        // fetch and write phases overlap. The window below keeps `workers`
+        // requests outstanding at all times instead of waiting for a whole
+        // batch to finish before starting the next one.
+        val workers = concurrency.coerceIn(1, 64)
         val pageRows = pageSize.coerceIn(1, 100)
+        val rowLimit = maxRows.coerceAtLeast(1L)
 
         destination.bufferedWriter(Charsets.UTF_8).use { writer ->
-            while (writtenRows < maxRows && writtenBytes < maxBytes && offset < totalRows) {
-                currentCoroutineContext().ensureActive()
-                val stopOffset = minOf(totalRows, maxRows)
-                val offsets = (0 until workers)
-                    .map { offset + it.toLong() * pageRows }
-                    .filter { it < stopOffset }
-                if (offsets.isEmpty()) break
-                val pages = try {
-                    coroutineScope {
-                        offsets.map { pageOffset ->
-                            val length = minOf(
-                                pageRows.toLong(),
-                                stopOffset - pageOffset
-                            ).toInt().coerceAtLeast(1)
-                            async {
-                                pageOffset to retryTransient {
-                                    bundle.serverApi.rows(
-                                        datasetId,
-                                        config,
-                                        split,
-                                        pageOffset,
-                                        length
-                                    )
-                                }
+            coroutineScope {
+                // Each entry remembers the offset and the length that were
+                // requested so the writer can detect a gap even if the server
+                // returns fewer rows than asked for.
+                val window =
+                    ArrayDeque<Triple<Long, Int, kotlinx.coroutines.Deferred<RowsResponse>>>()
+                var nextFetch = 0L
+                var consumedOffset = 0L
+                var finished = false
+
+                suspend fun fillWindow() {
+                    val stop = minOf(totalRows, rowLimit)
+                    while (!finished && window.size < workers && nextFetch < stop) {
+                        val offset = nextFetch
+                        val length = minOf(pageRows.toLong(), stop - offset)
+                            .toInt().coerceAtLeast(1)
+                        val deferred = async {
+                            retryTransient {
+                                bundle.serverApi.rows(
+                                    datasetId,
+                                    config,
+                                    split,
+                                    offset,
+                                    length
+                                )
                             }
-                        }.awaitAll()
+                        }
+                        window.addLast(Triple(offset, length, deferred))
+                        nextFetch += length
                     }
-                } catch (t: Throwable) {
-                    throw HfException(describeNetworkError(t), t)
                 }
 
-                var consumed = 0L
-                var reachedEnd = false
-                for ((pageOffset, page) in pages) {
-                    if (pageOffset != offset + consumed) break
-                    if (page.rows.isEmpty()) {
-                        reachedEnd = true
-                        break
-                    }
-                    if (page.num_rows_total > 0) totalRows = page.num_rows_total
-                    val pageColumns = if (columns.isNotEmpty()) columns else page.features
-                        .filter { isTextFeature(it) }
-                        .map { it.name }
-                    for (entry in page.rows) {
-                        val parts = pageColumns.mapNotNull { col ->
-                            (entry.row[col] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+                try {
+                    fillWindow()
+                    while (!finished && window.isNotEmpty()) {
+                        currentCoroutineContext().ensureActive()
+                        val (pageOffset, pageLength, deferred) = window.removeFirst()
+                        val page = try {
+                            deferred.await()
+                        } catch (t: Throwable) {
+                            throw HfException(describeNetworkError(t), t)
                         }
-                        if (parts.isEmpty()) continue
-                        val line = parts.joinToString("\n")
-                        val bytes = line.toByteArray(Charsets.UTF_8).size + 1
-                        if (writtenBytes + bytes > maxBytes && writtenRows > 0) {
-                            reachedEnd = true
+                        if (page.num_rows_total > 0L) {
+                            totalRows = page.num_rows_total
+                        }
+                        // Refill immediately so the next page is already in
+                        // flight while this one is written to disk.
+                        fillWindow()
+
+                        if (page.rows.isEmpty()) {
+                            finished = true
                             break
                         }
-                        writer.write(line)
-                        writer.newLine()
-                        writtenRows++
-                        writtenBytes += bytes
-                        if (preview.length < 4096) preview.append(line.take(4096 - preview.length)).append('\n')
-                        if (writtenRows >= maxRows) {
-                            reachedEnd = true
+                        val pageColumns = if (columns.isNotEmpty()) {
+                            columns
+                        } else {
+                            page.features.filter { isTextFeature(it) }.map { it.name }
+                        }
+                        if (pageColumns.isEmpty()) {
+                            throw HfException(
+                                "This split has no text columns. Choose a text column " +
+                                    "or another config."
+                            )
+                        }
+                        if (pageOffset != consumedOffset) {
+                            // The server returned a page out of order; stop
+                            // rather than interleave two ranges.
+                            finished = true
                             break
                         }
+                        consumedOffset += pageLength
+                        for (entry in page.rows) {
+                            val parts = pageColumns.mapNotNull { col ->
+                                (entry.row[col] as? JsonPrimitive)?.contentOrNull
+                                    ?.takeIf { it.isNotBlank() }
+                            }
+                            if (parts.isEmpty()) continue
+                            val line = parts.joinToString("\n")
+                            val bytes = line.toByteArray(Charsets.UTF_8).size + 1
+                            if (writtenBytes + bytes > maxBytes && writtenRows > 0L) {
+                                finished = true
+                                break
+                            }
+                            writer.write(line)
+                            writer.newLine()
+                            writtenRows++
+                            writtenBytes += bytes
+                            if (preview.length < 4096) {
+                                preview.append(line.take(4096 - preview.length)).append('\n')
+                            }
+                            if (writtenRows >= rowLimit) {
+                                finished = true
+                                break
+                            }
+                        }
+                        onProgress(DownloadStats(writtenRows, writtenBytes, preview.toString()))
                     }
-                    consumed += page.rows.size
-                    if (reachedEnd) break
+                } finally {
+                    window.forEach { (_, _, deferred) -> deferred.cancel() }
                 }
-                offset += consumed
-                val stats = DownloadStats(writtenRows, writtenBytes, preview.toString())
-                onProgress(stats)
-                if (reachedEnd || consumed == 0L || offset >= totalRows) break
             }
         }
 

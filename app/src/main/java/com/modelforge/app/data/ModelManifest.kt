@@ -1,6 +1,7 @@
 package com.modelforge.app.data
 
 import com.modelforge.app.core.ModelConfig
+import com.modelforge.app.training.CorpusBudget
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -63,9 +64,7 @@ data class TrainingSettings(
                 seqLength = seq,
                 checkpointEvery = maxOf(20, steps / 10),
                 sampleEvery = maxOf(20, steps / 5),
-                corpusChars = (steps.toLong() * batch * seq * 3L)
-                    .coerceIn(200_000L, 4_000_000L)
-                    .toInt()
+                corpusChars = CorpusBudget.forSteps(steps, batch, seq)
             )
         }
     }

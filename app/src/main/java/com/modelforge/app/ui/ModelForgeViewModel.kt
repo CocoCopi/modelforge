@@ -48,9 +48,11 @@ import com.modelforge.app.diagnostics.DiagnosticsState
 import com.modelforge.app.diagnostics.ForgeLog
 import com.modelforge.app.nativebridge.NativeModel
 import com.modelforge.app.nativebridge.PackedModel
+import com.modelforge.app.training.CorpusBudget
 import com.modelforge.app.training.TrainingService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -132,6 +134,7 @@ data class AiPlannerState(
     val appliedDatasetIds: Set<String> = emptySet(),
     val skippedDatasetIds: Set<String> = emptySet(),
     val skippedDatasetReasons: Map<String, String> = emptyMap(),
+    val failedDatasets: List<AiDatasetSuggestion> = emptyList(),
     val startedAt: Long = 0L,
     val events: Int = 0,
     val error: String? = null
@@ -409,7 +412,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 persona = draft.persona,
                 bits = draft.bits,
                 steps = draft.steps.coerceAtLeast(1),
-                batchSize = draft.batchSize.coerceIn(1, 32),
+                batchSize = draft.batchSize.coerceIn(1, 64),
                 seqLength = draft.seqLength,
                 learningRate = draft.learningRate,
                 warmupSteps = draft.warmupSteps,
@@ -681,12 +684,19 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         val plan = _aiPlanner.value.plan ?: return
         val req = lastAiRequest ?: return
         if (_aiPlanner.value.busy) return
+        val failed = _aiPlanner.value.failedDatasets.ifEmpty {
+            val reasons = _aiPlanner.value.skippedDatasetReasons
+            plan.datasets.filter { suggestion ->
+                suggestion.datasetId in _aiPlanner.value.skippedDatasetIds &&
+                    !reasons[suggestion.datasetId].orEmpty().contains("Already in the mix")
+            }
+        }
+        if (failed.isEmpty()) return
         _aiPlanner.value = _aiPlanner.value.copy(
             busy = true,
             streaming = "",
             applied = false,
-            stage = "Retrying dataset downloads",
-            appliedDatasetIds = emptySet(),
+            stage = "Retrying ${failed.size} failed dataset(s)",
             skippedDatasetIds = emptySet(),
             skippedDatasetReasons = emptyMap(),
             startedAt = System.currentTimeMillis(),
@@ -694,7 +704,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         )
         aiJob = viewModelScope.launch {
             try {
-                autoApplyDatasets(plan, req)
+                autoApplyDatasets(plan, req, only = failed)
                 finishAiPlan(plan)
             } catch (t: kotlinx.coroutines.CancellationException) {
                 throw t
@@ -736,47 +746,106 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             val steps = training.steps.coerceAtLeast(1)
             state.copy(
                 steps = steps,
-                batchSize = training.batchSize.coerceIn(1, 32),
+                batchSize = training.batchSize.coerceIn(1, 64),
                 seqLength = seq.coerceAtLeast(32),
                 learningRate = training.learningRate.coerceIn(1e-5f, 1e-2f),
                 warmupSteps = training.warmupSteps.coerceIn(1, steps),
                 checkpointEvery = maxOf(20, steps / 10),
                 sampleEvery = maxOf(20, steps / 5),
-                corpusChars = (steps.toLong() * training.batchSize * seq * 3L)
-                    .coerceIn(200_000L, 4_000_000L)
-                    .toInt(),
+                corpusChars = CorpusBudget.resolve(
+                    requested = 0,
+                    steps = steps,
+                    batchSize = training.batchSize,
+                    seqLength = seq,
+                    availableRamBytes = HardwareDetector.availableRamBytes(app)
+                ),
                 error = null
             )
         }
     }
 
-    private suspend fun autoApplyDatasets(plan: AiPlan, request: AiPlanRequest) {
+    private suspend fun autoApplyDatasets(
+        plan: AiPlan,
+        request: AiPlanRequest,
+        only: List<AiDatasetSuggestion>? = null
+    ) {
         val modelId = _wizard.value.modelId ?: return
         val dataDir = store.dataDir(modelId)
-        val before = _wizard.value.datasets.size
         aiRateLimited = false
-        val suggestions = plan.datasets
+        val suggestions = only ?: plan.datasets
+        val attempted = HashSet<String>(suggestions.map { it.datasetId })
         for ((position, suggestion) in suggestions.withIndex()) {
-            tryApplyDataset(suggestion, "${position + 1}/${suggestions.size}", dataDir, modelId)
-            if (aiRateLimited) return
-        }
-        if (_wizard.value.datasets.size > before || _wizard.value.datasets.isNotEmpty()) return
-
-        val fallbacks = AiDatasetFallbacks.forRequest(
-            languages = request.languages,
-            toolCalling = request.toolCalling,
-            reasoning = request.reasoning
-        ).filter { fallback -> suggestions.none { it.datasetId == fallback.datasetId } }
-        var fallbacksApplied = 0
-        for ((position, fallback) in fallbacks.withIndex()) {
             currentCoroutineContext().ensureActive()
-            _aiPlanner.update { it.copy(stage = "Trying verified starter data ${position + 1}/${fallbacks.size}") }
-            if (tryApplyDataset(fallback, "fallback ${position + 1}/${fallbacks.size}", dataDir, modelId)) {
-                fallbacksApplied++
-                if (fallbacksApplied >= 2) return
-            }
-            if (aiRateLimited) return
+            applyWithRetries(suggestion, "${position + 1}/${suggestions.size}", dataDir, modelId)
+            if (aiRateLimited) break
         }
+
+        // A model needs complementary data, not one source repeated. If the AI
+        // returned fewer than three distinct ids (or several downloads failed),
+        // top the mix up with verified fallbacks for the requested capabilities.
+        if (only == null) {
+            val applied = _wizard.value.datasets.map { it.datasetId }.distinct()
+            if (applied.size < 3) {
+                val fallbacks = AiDatasetFallbacks.forRequest(
+                    languages = request.languages,
+                    toolCalling = request.toolCalling,
+                    reasoning = request.reasoning
+                ).filter { fallback ->
+                    fallback.datasetId !in applied && fallback.datasetId !in attempted
+                }
+                for ((position, fallback) in fallbacks.withIndex()) {
+                    if (aiRateLimited) break
+                    currentCoroutineContext().ensureActive()
+                    _aiPlanner.update {
+                        it.copy(stage = "Adding complementary data ${position + 1}/${fallbacks.size}")
+                    }
+                    if (applyWithRetries(
+                            fallback,
+                            "complementary ${position + 1}/${fallbacks.size}",
+                            dataDir,
+                            modelId
+                        )
+                    ) {
+                        attempted += fallback.datasetId
+                        if (_wizard.value.datasets.map { it.datasetId }.distinct().size >= 3) break
+                    }
+                }
+            }
+        }
+
+        // "Already in the mix" is not a download failure, so it must not show
+        // up as something the Retry button can fix.
+        val reasons = _aiPlanner.value.skippedDatasetReasons
+        val failed = suggestions.filter { suggestion ->
+            suggestion.datasetId in _aiPlanner.value.skippedDatasetIds &&
+                !reasons[suggestion.datasetId].orEmpty().contains("Already in the mix")
+        }
+        _aiPlanner.update { it.copy(failedDatasets = failed) }
+    }
+
+    /**
+     * Three automatic attempts per AI-chosen dataset. Transient Hugging Face
+     * failures, a slow page or a rate-limit hiccup should not silently drop a
+     * dataset; the caller exposes a Retry button for whatever still fails.
+     */
+    private suspend fun applyWithRetries(
+        suggestion: AiDatasetSuggestion,
+        label: String,
+        dataDir: File,
+        modelId: String
+    ): Boolean {
+        repeat(3) { attempt ->
+            currentCoroutineContext().ensureActive()
+            if (tryApplyDataset(suggestion, label, dataDir, modelId)) return true
+            if (aiRateLimited) return false
+            if (attempt < 2) {
+                _aiPlanner.update {
+                    it.copy(stage = "Retrying ${suggestion.datasetId} (${attempt + 2}/3)")
+                }
+                delay(1_200L * (attempt + 1))
+            }
+        }
+        return false
     }
 
     private suspend fun tryApplyDataset(
@@ -815,7 +884,8 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 columns = resolved.columns,
                 maxRows = rows,
                 maxBytes = maxBytes,
-                destination = destination
+                destination = destination,
+                knownTotalRows = resolved.totalRows
             ) { progress ->
                 _aiPlanner.update {
                     it.copy(stage = "Downloading $id · ${progress.rows} rows ($label)")
@@ -906,9 +976,13 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 warmupSteps = maxOf(10, steps / 20),
                 checkpointEvery = maxOf(20, steps / 10),
                 sampleEvery = maxOf(20, steps / 5),
-                corpusChars = (steps.toLong() * it.batchSize * it.seqLength * 3L)
-                    .coerceIn(200_000L, 4_000_000L)
-                    .toInt()
+                corpusChars = CorpusBudget.resolve(
+                    requested = it.corpusChars,
+                    steps = steps,
+                    batchSize = it.batchSize,
+                    seqLength = it.seqLength,
+                    availableRamBytes = HardwareDetector.availableRamBytes(app)
+                )
             )
         }
     }
@@ -976,7 +1050,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 persona = preset.persona,
                 bits = if (preset.bits in info.supportedBits) preset.bits else info.supportedBits.firstOrNull() ?: 4,
                 steps = preset.steps.coerceAtLeast(1),
-                batchSize = preset.batchSize.coerceIn(1, 32),
+                batchSize = preset.batchSize.coerceIn(1, 64),
                 seqLength = preset.seqLength.coerceAtLeast(32),
                 learningRate = preset.learningRate,
                 warmupSteps = preset.warmupSteps,
@@ -1229,6 +1303,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             "dataset_${UUID.randomUUID()}.txt"
         )
         val requestedRows = state.rows
+        val requestedTotalRows = state.availableRows
         val requestedConfig = state.configName
         val requestedSplit = state.splitName
         val requestedColumns = state.columns.toList()
@@ -1243,7 +1318,8 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                     columns = requestedColumns,
                     maxRows = requestedRows,
                     maxBytes = freeDownloadBytes(modelId),
-                    destination = destination
+                    destination = destination,
+                    knownTotalRows = requestedTotalRows
                 ) { progress ->
                     updateWizard { it.copy(datasetProgress = progress) }
                 }

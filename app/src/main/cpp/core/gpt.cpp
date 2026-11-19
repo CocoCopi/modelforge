@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
@@ -209,25 +210,22 @@ void parallel_for_any(int n, Fn&& fn) {
 
 inline float dot_f32(const float* a, const float* b, int n) {
 #if defined(__aarch64__)
-    float32x4_t acc = vdupq_n_f32(0.0f);
+    // Four independent accumulators: a single FMA chain stalls on its own
+    // latency (the A55 needs several cycles per FMA), which is why the old
+    // one-accumulator loop only reached a fraction of the core's throughput.
+    float32x4_t s0 = vdupq_n_f32(0.0f);
+    float32x4_t s1 = vdupq_n_f32(0.0f);
+    float32x4_t s2 = vdupq_n_f32(0.0f);
+    float32x4_t s3 = vdupq_n_f32(0.0f);
     int i = 0;
-    for (; i + 4 <= n; i += 4) {
-        acc = vmlaq_f32(acc, vld1q_f32(a + i), vld1q_f32(b + i));
+    for (; i + 16 <= n; i += 16) {
+        s0 = vmlaq_f32(s0, vld1q_f32(a + i), vld1q_f32(b + i));
+        s1 = vmlaq_f32(s1, vld1q_f32(a + i + 4), vld1q_f32(b + i + 4));
+        s2 = vmlaq_f32(s2, vld1q_f32(a + i + 8), vld1q_f32(b + i + 8));
+        s3 = vmlaq_f32(s3, vld1q_f32(a + i + 12), vld1q_f32(b + i + 12));
     }
+    float32x4_t acc = vaddq_f32(vaddq_f32(s0, s1), vaddq_f32(s2, s3));
     float s = vaddvq_f32(acc);
-    for (; i < n; ++i) s += a[i] * b[i];
-    return s;
-#elif defined(__ARM_NEON)
-    float32x4_t acc = vdupq_n_f32(0.0f);
-    int i = 0;
-    for (; i + 4 <= n; i += 4) {
-        acc = vmlaq_f32(acc, vld1q_f32(a + i), vld1q_f32(b + i));
-    }
-    float32x2_t lo = vget_low_f32(acc);
-    float32x2_t hi = vget_high_f32(acc);
-    float32x2_t sum = vadd_f32(lo, hi);
-    sum = vpadd_f32(sum, sum);
-    float s = vget_lane_f32(sum, 0);
     for (; i < n; ++i) s += a[i] * b[i];
     return s;
 #else
@@ -237,22 +235,39 @@ inline float dot_f32(const float* a, const float* b, int n) {
 #endif
 }
 
+// y = x @ W^T.  W is [out, in].  Tile both the row and output dimensions so a
+// tile of W and a tile of x stay resident while they are reused; the old
+// per-row dot-product loop re-read the whole weight matrix for every token,
+// which is what made a 100M-parameter step take minutes on a phone.
 void matmul_nt_raw(const Tensor& x, const float* w, int out, Tensor& y) {
     const int n = x.rows;
     const int in = x.cols;
+    if (n <= 0 || out <= 0 || in <= 0) return;
     y.ensure(n, out);
+    constexpr int kOutTile = 8;
+    constexpr int kRowTile = 16;
+    const int outTiles = (out + kOutTile - 1) / kOutTile;
+    const int rowTiles = (n + kRowTile - 1) / kRowTile;
     const int64_t work = static_cast<int64_t>(n) * out * in;
-    auto body = [&](int r) {
-        const float* xr = x.row(r);
-        float* yr = y.row(r);
-        for (int o = 0; o < out; ++o) {
-            yr[o] = dot_f32(xr, w + static_cast<size_t>(o) * in, in);
+    auto body = [&](int tile) {
+        const int ob = tile / rowTiles;
+        const int rb = tile % rowTiles;
+        const int o0 = ob * kOutTile;
+        const int o1 = std::min(out, o0 + kOutTile);
+        const int r0 = rb * kRowTile;
+        const int r1 = std::min(n, r0 + kRowTile);
+        for (int o = o0; o < o1; ++o) {
+            const float* wr = w + static_cast<size_t>(o) * in;
+            for (int r = r0; r < r1; ++r) {
+                y.row(r)[o] = dot_f32(x.row(r), wr, in);
+            }
         }
     };
+    const int tiles = outTiles * rowTiles;
     if (work < 300000) {
-        for (int r = 0; r < n; ++r) body(r);
+        for (int t = 0; t < tiles; ++t) body(t);
     } else {
-        parallel_for(n, body);
+        parallel_for_any(tiles, body);
     }
 }
 
@@ -279,41 +294,68 @@ void matmul_dw_add(Param& p, const Tensor& dout, const Tensor& x) {
     const int out = p.rows;
     const int in = p.cols;
     const int n = dout.rows;
-    const int64_t work = static_cast<int64_t>(out) * in * n;
-    auto body = [&](int o) {
-        float* gp = p.g.data() + static_cast<size_t>(o) * in;
-        for (int i = 0; i < in; ++i) {
-            float s = 0.0f;
-            for (int r = 0; r < n; ++r) {
-                s += dout.row(r)[o] * x.row(r)[i];
+    if (out <= 0 || in <= 0 || n <= 0) return;
+    // dW += dout^T @ x.  Accumulate a small block of output rows so the inner
+    // loop stays contiguous over `in` (auto-vectorised) and each x row is
+    // reused for the whole output block.  The previous triple loop walked both
+    // operands with a stride, so it could not vectorise at all.
+    constexpr int kOutBlock = 8;
+    const int blocks = (out + kOutBlock - 1) / kOutBlock;
+    auto body = [&](int block) {
+        const int o0 = block * kOutBlock;
+        const int w = std::min(kOutBlock, out - o0);
+        thread_local std::vector<float> acc;
+        acc.assign(static_cast<size_t>(w) * static_cast<size_t>(in), 0.0f);
+        for (int r = 0; r < n; ++r) {
+            const float* xr = x.row(r);
+            const float* dr = dout.row(r) + o0;
+            for (int j = 0; j < w; ++j) {
+                const float g = dr[j];
+                if (g == 0.0f) continue;
+                float* a = acc.data() + static_cast<size_t>(j) * in;
+                for (int i = 0; i < in; ++i) a[i] += g * xr[i];
             }
-            gp[i] += s;
+        }
+        for (int j = 0; j < w; ++j) {
+            float* gp = p.g.data() + static_cast<size_t>(o0 + j) * in;
+            const float* a = acc.data() + static_cast<size_t>(j) * in;
+            for (int i = 0; i < in; ++i) gp[i] += a[i];
         }
     };
+    const int64_t work = static_cast<int64_t>(out) * in * n;
     if (work < 300000) {
-        for (int o = 0; o < out; ++o) body(o);
+        for (int b = 0; b < blocks; ++b) body(b);
     } else {
-        parallel_for(out, body);
+        parallel_for_any(blocks, body);
     }
 }
 
 void matmul_dx_add(const Tensor& dout, const float* w, int out, int in, Tensor& din) {
     const int n = dout.rows;
-    const int64_t work = static_cast<int64_t>(n) * out * in;
-    auto body = [&](int r) {
-        const float* dr = dout.row(r);
-        float* di = din.row(r);
+    if (n <= 0 || out <= 0 || in <= 0) return;
+    // dX += dout @ W.  Process a block of rows together so each weight row is
+    // loaded once per row block instead of once per row; the inner loop over
+    // `in` is contiguous and vectorises.
+    constexpr int kRowBlock = 8;
+    const int blocks = (n + kRowBlock - 1) / kRowBlock;
+    auto body = [&](int block) {
+        const int r0 = block * kRowBlock;
+        const int r1 = std::min(n, r0 + kRowBlock);
         for (int o = 0; o < out; ++o) {
-            const float g = dr[o];
-            if (g == 0.0f) continue;
             const float* wr = w + static_cast<size_t>(o) * in;
-            for (int k = 0; k < in; ++k) di[k] += g * wr[k];
+            for (int r = r0; r < r1; ++r) {
+                const float g = dout.row(r)[o];
+                if (g == 0.0f) continue;
+                float* di = din.row(r);
+                for (int k = 0; k < in; ++k) di[k] += g * wr[k];
+            }
         }
     };
+    const int64_t work = static_cast<int64_t>(n) * out * in;
     if (work < 300000) {
-        for (int r = 0; r < n; ++r) body(r);
+        for (int b = 0; b < blocks; ++b) body(b);
     } else {
-        parallel_for(n, body);
+        parallel_for_any(blocks, body);
     }
 }
 
@@ -737,6 +779,10 @@ void GPT::forward_logits(const int* tokens, int B, int T) {
     cache_.x0 = cur;
 
     for (int l = 0; l < cfg_.layers; ++l) {
+        if (stop_requested()) {
+            aborted_ = true;
+            return;
+        }
         Layer& layer = layers_[l];
         LayerCache& lc = cache_.layers[l];
 
@@ -784,6 +830,10 @@ void GPT::forward_logits(const int* tokens, int B, int T) {
     }
 
     cache_.final_in = cur;
+    if (stop_requested()) {
+        aborted_ = true;
+        return;
+    }
     layernorm_forward(cur, lnf_g_.w.data(), lnf_b_.w.data(), cache_.lnf, cache_.invf, kLnEps);
     matmul_nt_raw(cache_.lnf, wte_.data(), V, cache_.logits);
 }
@@ -801,7 +851,13 @@ float GPT::forward(const int* tokens, const int* targets, int B, int T) {
         cache_ = ForwardCache{};
         return -1.0f;
     }
+    aborted_ = false;
     forward_logits(tokens, B, T);
+    if (aborted_ || stop_requested()) {
+        aborted_ = true;
+        cache_ = ForwardCache{};
+        return kStopped;
+    }
     // Inference-only forwards must not leave a stale dlogits buffer behind for
     // an explicit backward() call to consume.
     if (targets == nullptr) {
@@ -816,6 +872,11 @@ void GPT::backward() {
     if (cache_.logits.d.empty() || cache_.dlogits.d.empty()) return;
     if (cache_.dlogits.rows != cache_.logits.rows ||
         cache_.dlogits.cols != cache_.logits.cols) {
+        return;
+    }
+    aborted_ = false;
+    if (stop_requested()) {
+        aborted_ = true;
         return;
     }
     const int d = cfg_.d_model;
@@ -834,6 +895,10 @@ void GPT::backward() {
     layernorm_backward(cache_.final_in, lnf_g_, lnf_b_, dlnf, dcur, cache_.invf);
 
     for (int l = cfg_.layers - 1; l >= 0; --l) {
+        if (stop_requested()) {
+            aborted_ = true;
+            return;
+        }
         Layer& layer = layers_[l];
         LayerCache& lc = cache_.layers[l];
 
@@ -944,8 +1009,15 @@ float GPT::train_step(const int* tokens, const int* targets, int B, int T,
         cache_ = ForwardCache{};
         return -1.0f;
     }
+    if (stop_requested()) return kStopped;
     zero_grads();
     const float loss = forward(tokens, targets, B, T);
+    if (aborted_ || stop_requested()) {
+        cache_ = ForwardCache{};
+        zero_grads();
+        aborted_ = true;
+        return kStopped;
+    }
     if (!(loss >= 0.0f) || !std::isfinite(loss)) {
         // A rejected batch must never apply gradients from the previous step.
         cache_ = ForwardCache{};
@@ -953,8 +1025,17 @@ float GPT::train_step(const int* tokens, const int* targets, int B, int T,
         return -1.0f;
     }
     backward();
+    if (aborted_ || stop_requested()) {
+        // Gradients were only partially accumulated and AdamW has not run, so
+        // the weights are still exactly the previous step's weights.
+        cache_ = ForwardCache{};
+        zero_grads();
+        aborted_ = true;
+        return kStopped;
+    }
     adam_update(lr, weight_decay);
     zero_grads();
+    aborted_ = false;
     return loss;
 }
 

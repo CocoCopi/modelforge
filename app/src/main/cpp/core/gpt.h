@@ -2,6 +2,7 @@
 
 #include "core/config.h"
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -184,6 +185,15 @@ public:
     long long step() const { return step_; }
     void set_step(long long s) { step_ = s; }
 
+    // Cooperative stop for training. A phone step can take seconds, so the
+    // service asks the engine to abandon the current step at the next layer
+    // boundary instead of waiting for it to finish. Aborting before AdamW
+    // leaves the weights exactly as they were at the previous step.
+    void request_stop() { stop_requested_.store(true, std::memory_order_relaxed); }
+    void clear_stop() { stop_requested_.store(false, std::memory_order_relaxed); }
+    bool stop_requested() const { return stop_requested_.load(std::memory_order_relaxed); }
+    static constexpr float kStopped = -2.0f;
+
     // Number of updates actually applied to the AdamW moments. This is kept
     // separate from step_ so a weights-only recovery checkpoint can keep the
     // training progress counter while restarting bias correction from zero.
@@ -202,6 +212,8 @@ private:
     int qat_group_ = 32;
     long long step_ = 0;
     long long adam_step_ = 0;
+    std::atomic<bool> stop_requested_{false};
+    bool aborted_ = false;
     ForwardCache cache_;
 
     friend struct PackedModel;

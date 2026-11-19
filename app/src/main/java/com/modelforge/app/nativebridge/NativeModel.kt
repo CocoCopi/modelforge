@@ -1,17 +1,25 @@
 package com.modelforge.app.nativebridge
 
 import com.modelforge.app.core.ModelConfig
+import java.util.concurrent.locks.ReentrantReadWriteLock
 
 /**
  * Thread-safe Kotlin wrapper around one native GPT model.
  * All operations are serialized because a training step mutates the model.
+ *
+ * [requestStop] is the one exception: it must reach the engine while a step is
+ * running, so it deliberately does not take the per-model monitor. A read/write
+ * lock only guards the native handle against being freed concurrently.
  */
 class NativeModel private constructor(
-    private var handle: Long,
+    @Volatile private var handle: Long,
     var config: ModelConfig,
     var quantBits: Int,
     var quantGroup: Int
 ) : AutoCloseable {
+
+    /** Guards [handle] against [close] racing [requestStop]. */
+    private val lifecycle = ReentrantReadWriteLock()
 
     val paramCount: Long
         @Synchronized get() = if (handle == 0L) 0L else NativeBridge.nativeParamCount(handle)
@@ -25,6 +33,27 @@ class NativeModel private constructor(
     fun trainStep(tokens: IntArray, targets: IntArray, batch: Int, seq: Int, lr: Float, weightDecay: Float): Float {
         check(handle != 0L) { "Model is closed" }
         return NativeBridge.nativeTrainStep(handle, tokens, targets, batch, seq, lr, weightDecay)
+    }
+
+    /**
+     * Cooperatively abandons the current native step at the next layer
+     * boundary. Returns immediately; the training loop observes
+     * [STOPPED] from [trainStep] once the native side has unwound.
+     */
+    fun requestStop() {
+        if (!lifecycle.readLock().tryLock()) return
+        try {
+            val h = handle
+            if (h != 0L) NativeBridge.nativeRequestStop(h)
+        } finally {
+            lifecycle.readLock().unlock()
+        }
+    }
+
+    /** Clears a previously requested stop so the model can be reused. */
+    @Synchronized
+    fun clearStop() {
+        if (handle != 0L) NativeBridge.nativeClearStop(handle)
     }
 
     @Synchronized
@@ -77,13 +106,22 @@ class NativeModel private constructor(
 
     @Synchronized
     override fun close() {
-        if (handle != 0L) {
-            NativeBridge.nativeFree(handle)
-            handle = 0L
+        lifecycle.writeLock().lock()
+        try {
+            if (handle != 0L) {
+                val h = handle
+                handle = 0L
+                NativeBridge.nativeFree(h)
+            }
+        } finally {
+            lifecycle.writeLock().unlock()
         }
     }
 
     companion object {
+        /** Returned by [trainStep] when [requestStop] aborted the step. */
+        const val STOPPED = -2.0f
+
         fun create(config: ModelConfig, seed: Long = System.nanoTime()): NativeModel? {
             val handle = NativeBridge.nativeCreate(
                 config.vocabSize,
