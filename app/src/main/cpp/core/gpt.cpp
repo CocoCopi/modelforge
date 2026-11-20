@@ -290,6 +290,137 @@ inline float gelu_grad_scalar(float x) {
     return 0.5f * (1.0f + t) + 0.5f * x * (1.0f - t * t) * du;
 }
 
+#if defined(__aarch64__)
+// dW[o][i] += sum_r dout[r][o] * x[r][i]
+//
+// The reduction axis is the batch, so the tile covers the output and input
+// axes: an 8x8 tile keeps 64 accumulators in vector registers and reads
+// every value of dout and x once per tile.  The previous version accumulated
+// into a scratch buffer for every single row, which spent most of the step
+// moving memory instead of multiplying.
+void matmul_dw_add(Param& p, const Tensor& dout, const Tensor& x) {
+    const int out = p.rows;
+    const int in = p.cols;
+    const int n = dout.rows;
+    if (out <= 0 || in <= 0 || n <= 0) return;
+    constexpr int kOutTile = 8;
+    constexpr int kInTile = 8;
+    const int outTiles = (out + kOutTile - 1) / kOutTile;
+    const int inTiles = (in + kInTile - 1) / kInTile;
+    auto body = [&](int tile) {
+        const int ot = tile / inTiles;
+        const int it = tile % inTiles;
+        const int o0 = ot * kOutTile;
+        const int i0 = it * kInTile;
+        const int nr = std::min(kOutTile, out - o0);
+        const int ni = std::min(kInTile, in - i0);
+        if (nr == kOutTile && ni == kInTile) {
+            float32x4_t lo[kOutTile];
+            float32x4_t hi[kOutTile];
+            for (int oi = 0; oi < kOutTile; ++oi) {
+                lo[oi] = vdupq_n_f32(0.0f);
+                hi[oi] = vdupq_n_f32(0.0f);
+            }
+            for (int r = 0; r < n; ++r) {
+                const float* dr = dout.row(r) + o0;
+                const float* xr = x.row(r) + i0;
+                const float32x4_t x0 = vld1q_f32(xr);
+                const float32x4_t x1 = vld1q_f32(xr + 4);
+                for (int oi = 0; oi < kOutTile; ++oi) {
+                    const float32x4_t g = vdupq_n_f32(dr[oi]);
+                    lo[oi] = vmlaq_f32(lo[oi], g, x0);
+                    hi[oi] = vmlaq_f32(hi[oi], g, x1);
+                }
+            }
+            for (int oi = 0; oi < kOutTile; ++oi) {
+                float* gp = p.g.data() + static_cast<size_t>(o0 + oi) * in + i0;
+                vst1q_f32(gp, vaddq_f32(vld1q_f32(gp), lo[oi]));
+                vst1q_f32(gp + 4, vaddq_f32(vld1q_f32(gp + 4), hi[oi]));
+            }
+            return;
+        }
+        // Edge tile: a plain scalar accumulation for the last few rows.
+        for (int r = 0; r < n; ++r) {
+            const float* dr = dout.row(r) + o0;
+            const float* xr = x.row(r) + i0;
+            for (int oi = 0; oi < nr; ++oi) {
+                const float g = dr[oi];
+                float* gp = p.g.data() + static_cast<size_t>(o0 + oi) * in + i0;
+                for (int ii = 0; ii < ni; ++ii) gp[ii] += g * xr[ii];
+            }
+        }
+    };
+    const int64_t work = static_cast<int64_t>(out) * in * n;
+    const int tiles = outTiles * inTiles;
+    if (work < 300000) {
+        for (int t = 0; t < tiles; ++t) body(t);
+    } else {
+        parallel_for_any(tiles, body);
+    }
+}
+
+// dX[r][i] += sum_o dout[r][o] * W[o][i]
+//
+// The reduction axis is the output axis, so the tile covers four rows of dX
+// and eight input columns.  The weight row is loaded once per tile instead of
+// once per row and the accumulators stay in vector registers.
+void matmul_dx_add(const Tensor& dout, const float* w, int out, int in, Tensor& din) {
+    const int n = dout.rows;
+    if (n <= 0 || out <= 0 || in <= 0) return;
+    constexpr int kRowTile = 4;
+    constexpr int kInTile = 8;
+    const int rowTiles = (n + kRowTile - 1) / kRowTile;
+    const int inTiles = (in + kInTile - 1) / kInTile;
+    auto body = [&](int tile) {
+        const int rt = tile / inTiles;
+        const int it = tile % inTiles;
+        const int r0 = rt * kRowTile;
+        const int i0 = it * kInTile;
+        const int nr = std::min(kRowTile, n - r0);
+        const int ni = std::min(kInTile, in - i0);
+        if (nr == kRowTile && ni == kInTile) {
+            float32x4_t lo[kRowTile];
+            float32x4_t hi[kRowTile];
+            for (int ri = 0; ri < kRowTile; ++ri) {
+                lo[ri] = vdupq_n_f32(0.0f);
+                hi[ri] = vdupq_n_f32(0.0f);
+            }
+            for (int o = 0; o < out; ++o) {
+                const float* wr = w + static_cast<size_t>(o) * in + i0;
+                const float32x4_t w0 = vld1q_f32(wr);
+                const float32x4_t w1 = vld1q_f32(wr + 4);
+                for (int ri = 0; ri < kRowTile; ++ri) {
+                    const float32x4_t g = vdupq_n_f32(dout.row(r0 + ri)[o]);
+                    lo[ri] = vmlaq_f32(lo[ri], g, w0);
+                    hi[ri] = vmlaq_f32(hi[ri], g, w1);
+                }
+            }
+            for (int ri = 0; ri < kRowTile; ++ri) {
+                float* di = din.row(r0 + ri) + i0;
+                vst1q_f32(di, vaddq_f32(vld1q_f32(di), lo[ri]));
+                vst1q_f32(di + 4, vaddq_f32(vld1q_f32(di + 4), hi[ri]));
+            }
+            return;
+        }
+        // Edge tile.
+        for (int o = 0; o < out; ++o) {
+            const float* wr = w + static_cast<size_t>(o) * in + i0;
+            for (int ri = 0; ri < nr; ++ri) {
+                const float g = dout.row(r0 + ri)[o];
+                float* di = din.row(r0 + ri) + i0;
+                for (int ii = 0; ii < ni; ++ii) di[ii] += g * wr[ii];
+            }
+        }
+    };
+    const int64_t work = static_cast<int64_t>(n) * out * in;
+    const int tiles = rowTiles * inTiles;
+    if (work < 300000) {
+        for (int t = 0; t < tiles; ++t) body(t);
+    } else {
+        parallel_for_any(tiles, body);
+    }
+}
+#else
 void matmul_dw_add(Param& p, const Tensor& dout, const Tensor& x) {
     const int out = p.rows;
     const int in = p.cols;
@@ -297,8 +428,7 @@ void matmul_dw_add(Param& p, const Tensor& dout, const Tensor& x) {
     if (out <= 0 || in <= 0 || n <= 0) return;
     // dW += dout^T @ x.  Accumulate a small block of output rows so the inner
     // loop stays contiguous over `in` (auto-vectorised) and each x row is
-    // reused for the whole output block.  The previous triple loop walked both
-    // operands with a stride, so it could not vectorise at all.
+    // reused for the whole output block.
     constexpr int kOutBlock = 8;
     const int blocks = (out + kOutBlock - 1) / kOutBlock;
     auto body = [&](int block) {
@@ -358,19 +488,21 @@ void matmul_dx_add(const Tensor& dout, const float* w, int out, int in, Tensor& 
         parallel_for_any(blocks, body);
     }
 }
+#endif
 
 void bias_grad_add(Param& b, const Tensor& dout) {
     const int out = b.cols;
-    auto body = [&](int o) {
-        float s = 0.0f;
-        for (int r = 0; r < dout.rows; ++r) s += dout.row(r)[o];
-        b.g[o] += s;
-    };
-    if (static_cast<int64_t>(out) * dout.rows < 300000) {
-        for (int o = 0; o < out; ++o) body(o);
-    } else {
-        parallel_for(out, body);
+    const int n = dout.rows;
+    if (out <= 0 || n <= 0) return;
+    // Sum the rows into a contiguous accumulator.  Reading one column at a
+    // time walked the whole gradient matrix with a stride and cost more than
+    // the multiplication it was supposed to accompany.
+    std::vector<float> acc(static_cast<size_t>(out), 0.0f);
+    for (int r = 0; r < n; ++r) {
+        const float* dr = dout.row(r);
+        for (int o = 0; o < out; ++o) acc[o] += dr[o];
     }
+    for (int o = 0; o < out; ++o) b.g[o] += acc[o];
 }
 
 void layernorm_backward(const Tensor& x, Param& gamma, Param& beta,

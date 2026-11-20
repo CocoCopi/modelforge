@@ -4,7 +4,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
@@ -13,7 +12,6 @@ import kotlinx.serialization.json.contentOrNull
 import com.modelforge.app.diagnostics.ForgeLog
 import retrofit2.HttpException
 import java.io.File
-import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 
 interface AiDatasetSource {
@@ -30,10 +28,17 @@ class HfRepository(
 
     private val detailCache = ConcurrentHashMap<String, CacheEntry<HfDatasetSummary>>()
     private val structureCache = ConcurrentHashMap<String, CacheEntry<DatasetStructure>>()
+    private val fileSource: HfFileSource? = bundle.fileApi?.let { api ->
+        RetrofitFileSource(api, bundle.authenticated)
+    }
+
+    private fun authenticated(): Boolean = bundle.authenticated()
 
     override suspend fun search(query: String, limit: Int): List<HfDatasetSummary> {
         return try {
-            retryTransient { bundle.publicApi.searchDatasets(query, limit) }
+            retryTransient(HfRateLimiter.HUB) {
+                bundle.publicApi.searchDatasets(query, limit)
+            }
         } catch (t: Throwable) {
             throw HfException(describeNetworkError(t), t)
         }
@@ -42,7 +47,7 @@ class HfRepository(
     override suspend fun detail(id: String): HfDatasetSummary {
         cached(detailCache, id)?.let { return it }
         return try {
-            val d = retryTransient { bundle.publicApi.datasetDetail(id) }
+            val d = retryTransient(HfRateLimiter.HUB) { bundle.publicApi.datasetDetail(id) }
             val summary = HfDatasetSummary(
                 id = d.id,
                 downloads = d.downloads,
@@ -60,7 +65,7 @@ class HfRepository(
 
     suspend fun validateToken(): String {
         return try {
-            val account = retryTransient { bundle.publicApi.whoAmI() }
+            val account = retryTransient(HfRateLimiter.HUB) { bundle.publicApi.whoAmI() }
             val label = account.fullname?.takeIf { it.isNotBlank() } ?: account.name
             if (label.isBlank()) "Credential accepted by Hugging Face." else "Credential accepted as $label."
         } catch (t: Throwable) {
@@ -80,7 +85,7 @@ class HfRepository(
             ?.takeIf { it > 0L }
         if (known != null) return known
         return try {
-            val page = retryTransient {
+            val page = retryTransient(HfRateLimiter.VIEWER) {
                 bundle.serverApi.rows(datasetId, config, split, 0, 1)
             }
             page.num_rows_total.takeIf { it > 0L }
@@ -93,7 +98,7 @@ class HfRepository(
     override suspend fun structure(datasetId: String): DatasetStructure {
         cached(structureCache, datasetId)?.let { return it }
         try {
-            val info = retryTransient { bundle.serverApi.info(datasetId) }
+            val info = retryTransient(HfRateLimiter.VIEWER) { bundle.serverApi.info(datasetId) }
             if (info.dataset_info.isNotEmpty()) {
                 val configs = info.dataset_info.map { (name, entry) ->
                     DatasetConfigInfo(
@@ -114,7 +119,7 @@ class HfRepository(
             // Fall through to the splits endpoint; some datasets have no info yet.
         }
         return try {
-            val splits = retryTransient { bundle.serverApi.splits(datasetId) }
+            val splits = retryTransient(HfRateLimiter.VIEWER) { bundle.serverApi.splits(datasetId) }
             if (splits.splits.isEmpty()) {
                 throw HfException("No configs or splits are available for $datasetId.")
             }
@@ -156,7 +161,7 @@ class HfRepository(
     ): List<String> {
         for (split in splits) {
             try {
-                val columns = retryTransient {
+                val columns = retryTransient(HfRateLimiter.VIEWER) {
                     bundle.serverApi.rows(datasetId, config, split, 0, 1).features
                         .filter { isTextFeature(it) }
                         .map { it.name }
@@ -183,6 +188,32 @@ class HfRepository(
         onProgress: (DownloadStats) -> Unit = {}
     ): DownloadStats = withContext(Dispatchers.IO) {
         destination.parentFile?.mkdirs()
+        // Prefer the repository's own data files. This is one or two resolver
+        // requests instead of one viewer request per 100 rows, so it is both
+        // faster and outside the Hub API quota. Any problem falls through to
+        // the viewer, which keeps the old behaviour working.
+        val source = fileSource
+        if (source != null) {
+            val direct = try {
+                HfTextFiles.download(
+                    source = source,
+                    datasetId = datasetId,
+                    config = config,
+                    split = split,
+                    columns = columns,
+                    maxRows = maxRows,
+                    maxBytes = maxBytes,
+                    destination = destination,
+                    onProgress = onProgress
+                )
+            } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                runCatching { destination.delete() }
+                ForgeLog.warn("hf", "Direct download failed for $datasetId; using the viewer", t)
+                null
+            }
+            if (direct != null) return@withContext direct
+        }
         var writtenRows = 0L
         var writtenBytes = 0L
         val preview = StringBuilder()
@@ -214,7 +245,7 @@ class HfRepository(
                         val length = minOf(pageRows.toLong(), stop - offset)
                             .toInt().coerceAtLeast(1)
                         val deferred = async {
-                            retryTransient {
+                            retryTransient(HfRateLimiter.VIEWER) {
                                 bundle.serverApi.rows(
                                     datasetId,
                                     config,
@@ -309,40 +340,20 @@ class HfRepository(
         DownloadStats(writtenRows, writtenBytes, preview.toString())
     }
 
-    private suspend fun <T> retryTransient(block: suspend () -> T): T {
-        var attempt = 0
-        while (true) {
-            try {
-                return block()
-            } catch (t: Throwable) {
-                val code = (t as? HttpException)?.code()
-                val rateLimited = code == 429
-                val transient = t is IOException || rateLimited ||
-                    code == 500 || code == 502 || code == 503 || code == 504
-                val maxAttempts = if (rateLimited) 4 else 3
-                if (!transient || attempt >= maxAttempts - 1) throw t
-                val retryAfter = (t as? HttpException)?.response()?.headers()
-                    ?.get("Retry-After")?.toLongOrNull()
-                val seconds = when {
-                    rateLimited -> retryAfter?.coerceIn(1L, 120L) ?: RATE_LIMIT_WAIT_SECONDS[attempt]
-                    else -> retryAfter?.coerceIn(1L, 30L) ?: (2L * (attempt + 1))
-                }
-                val notice = if (rateLimited) {
-                    "Hugging Face rate limit; waiting ${seconds}s before retrying"
-                } else {
-                    "Hugging Face is busy; retrying in ${seconds}s"
-                }
+    private suspend fun <T> retryTransient(host: String, block: suspend () -> T): T =
+        pacedRequest(
+            host = host,
+            authenticated = authenticated(),
+            maxAttempts = 3,
+            onThrottle = { notice ->
                 ForgeLog.warn("hf", notice)
                 onThrottle(notice)
-                delay(seconds * 1_000L)
-                attempt++
-            }
-        }
-    }
+            },
+            block = block
+        )
 
     companion object {
         private const val CACHE_TTL_MS = 10 * 60 * 1_000L
-        private val RATE_LIMIT_WAIT_SECONDS = longArrayOf(5, 20, 60)
 
         fun textColumns(features: Map<String, JsonObject>): List<String> {
             return features.entries

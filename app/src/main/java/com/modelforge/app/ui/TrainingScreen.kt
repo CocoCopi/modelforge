@@ -226,7 +226,7 @@ private fun ControlsCard(
                 color = ForgeColors.emberText
             )
         }
-        InfoRow("Best checkpoint", if (vm.checkpointMegabytes(modelId).second > 0) "saved" else "not yet")
+        InfoRow("Checkpoint", if (vm.checkpointMegabytes(modelId).second > 0) "saved" else "not yet")
         InfoRow("Steps configured", manifest.settings.steps.toString())
     }
 }

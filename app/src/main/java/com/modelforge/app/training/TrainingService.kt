@@ -646,17 +646,36 @@ class TrainingService : Service() {
                 }
             }
 
+            // Save the final weights and make sure a loadable "best" checkpoint
+            // exists. The playground, identity check and exporters all read
+            // best.mfck; a run stopped before its first periodic checkpoint
+            // used to announce success while that file had never been written.
+            var savedOk = true
             if (model!!.isOpen) {
-                withContext(Dispatchers.IO) {
-                    model!!.saveCheckpoint(store.lastCheckpoint(modelId).absolutePath, true)
+                savedOk = withContext(Dispatchers.IO) {
+                    val lastOk = model!!.saveCheckpoint(
+                        store.lastCheckpoint(modelId).absolutePath,
+                        true
+                    )
+                    val best = store.bestCheckpoint(modelId)
+                    val bestOk = if (CheckpointHeader.hasMagic(best)) {
+                        true
+                    } else {
+                        model!!.saveCheckpoint(best.absolutePath, false)
+                    }
+                    lastOk && bestOk
                 }
             }
             val stopped = run.stopRequested
             val status = if (stopped) TrainingStatus.STOPPED else TrainingStatus.COMPLETED
-            val message = if (stopped) {
-                "Training stopped at step $step. The checkpoint is saved."
-            } else {
-                "Training finished at step $step. Best measured loss ${String.format("%.4f", bestLoss)}."
+            val verb = if (stopped) "stopped" else "finished"
+            val message = when {
+                !savedOk -> "Training $verb at step $step, but the final checkpoint could not " +
+                    "be written. Free some storage and train again so the model can be tested."
+                stopped -> "Training stopped at step $step. Checkpoint saved; open the " +
+                    "playground to test it."
+                else -> "Training finished at step $step. Best measured loss " +
+                    String.format("%.4f", bestLoss) + "."
             }
             finish(modelId, status, message, state.copy(step = step, totalSteps = totalSteps, bestLoss = bestLoss))
         } catch (cancel: CancellationException) {

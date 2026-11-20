@@ -1088,6 +1088,13 @@ private fun SelectedDatasetCard(
                         color = ForgeColors.inkMuted
                     )
                 }
+                state.datasetNotice?.let { notice ->
+                    Text(
+                        notice,
+                        style = ForgeType.monoSmall,
+                        color = ForgeColors.inkMuted
+                    )
+                }
             } else {
                 ForgeButton(
                     "Download and add",

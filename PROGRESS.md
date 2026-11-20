@@ -1084,3 +1084,103 @@ was interrupted is repeated when training is resumed.
   are now fixed: the constructor parameter `app` is only in scope for property
   initializers, and `@Volatile` was moved onto a member property.
 
+
+## Production release v2.4.0 - downloads that respect the real Hugging Face quota
+
+Status: IN PROGRESS - implementation and local checks in progress; the JVM,
+Paparazzi and signed-build jobs run in GitHub Actions.
+
+### Reported problem
+
+An authenticated user was told "Hugging Face rate limit" roughly every five
+seconds while downloading a dataset. The token was configured, so the suspicion
+was that the app was making background requests it did not need.
+
+### What was actually happening
+
+- The Hub allows 1,000 API calls per 5 minutes for a signed-in free account
+  (500 anonymous, 2,500 PRO). That is one call every 300 ms.
+- The viewer's `/rows` endpoint caps a response at 100 rows. A 132,924-row
+  download is therefore about 1,330 requests.
+- The downloader kept 24 of those in flight. On a normal connection a page takes
+  a few hundred milliseconds, so the app produced roughly 50-80 requests per
+  second - about 20,000 per five-minute window, or 20x the quota.
+- On top of that, each of the 24 workers retried a 429 on its own with a 5 s
+  first wait. That is exactly the "rate limited every five seconds" symptom: a
+  new independent retry, not a background poller. There is no periodic network
+  code in the app (the only timers are the 1 s UI refresh ticks).
+
+The previous release made the burst worse by raising concurrency from 12 to 24
+without a client-side budget, so v2.3.0 is the version where this became easy to
+hit.
+
+### Fix 1 - read the repository's own data files
+
+- `HfFileApi` lists a repository tree (`/api/datasets/{id}/tree/{revision}`) and
+  streams a file through its resolver URL
+  (`/datasets/{id}/resolve/{revision}/{path}`), with an HTTP `Range` request for
+  only the bytes that are needed.
+- `HfTextFiles` recognises JSONL, JSON, CSV, TSV and TXT (optionally gzipped),
+  prefers JSONL over JSON, and refuses to mix a different split into the one
+  that was requested. It looks in the repository root, then `data/`, then a
+  directory named after the config - at most three listings in total.
+- CSV parsing handles quoted delimiters and embedded newlines. A JSON array is
+  read object by object instead of loading the file into memory. Plain text is
+  joined into documents at `<|endoftext|>` or blank lines, which matches the
+  format used by TinyStories.
+- A whole 15k-row JSONL split is now one resolver request instead of 151 viewer
+  requests. This also avoids the viewer's per-cell truncation, so long documents
+  are no longer silently shortened.
+- Anything unexpected - no suitable file, no requested column, a gated repo, a
+  parse error - returns `null` and the existing viewer pipeline runs unchanged.
+  The fast path can only make a download faster, never break one.
+
+### Fix 2 - one adaptive gate instead of 24 independent retries
+
+`HfRateLimiter` is shared by every request in the process and keeps one gate per
+host:
+
+- Requests reserve a slot spaced by an adaptive interval. The Hub floor is 380 ms
+  for a signed-in user and 700 ms anonymous, which leaves headroom inside the
+  1,000-per-5-minute budget for metadata, tree listings and the AI's
+  search/inspect calls. The viewer starts at 250 ms and speeds up to 120 ms after
+  sustained success, because its real quota is not published.
+- A 429 sets a cooldown for the whole process, so all workers pause together
+  instead of each retrying. The cooldown comes from `Retry-After` or the
+  `RateLimit` header (`t=<seconds>`), capped at 120 s.
+- The interval doubles on a 429 and shrinks by 10% every 25 successes, so the
+  pace converges on what the server actually allows.
+- `pacedRequest` handles the retry loop; there is no second sleep in the
+  repository, so a throttled download has exactly one wait point.
+- The UI shows "Hugging Face asked us to slow down; resuming in Ns" while pacing
+  and clears it when the download finishes.
+
+### Request accounting
+
+| Download | Before | After (text repository) |
+| --- | ---: | ---: |
+| 15,000 rows, JSONL | 151 viewer requests | 1 tree request + 1 resolver request |
+| 132,924 rows, parquet only | ~1,330 viewer requests, burst at 24 in flight | ~1,330 paced viewer requests at <= 8.3/s |
+| Metadata per dataset | 2 Hub requests | unchanged |
+
+Parquet remains the viewer fallback: the app does not ship a parquet reader, so
+those repositories are paced rather than instant. Text repositories are the
+majority of the instruction and story corpora the app recommends.
+
+### Tests
+
+- `HfRateLimiterTest`: requests are spaced, a 429 pauses every worker, the
+  cooldown is honoured, `RateLimit` reset seconds are parsed, and an absurd
+  `Retry-After` is capped.
+- `HfTextFilesTest`: extension detection, split selection (train is never mixed
+  with test), JSONL/JSON-array/CSV/TXT parsing, gzip, direct download statistics,
+  fallback when a column is missing, and one-level directory discovery.
+- `HfRepositoryDirectTest`: a download with a JSONL file makes zero viewer
+  requests, and a parquet-only repository still falls back to the viewer.
+- `HfRepositoryStructureTest`: the page pipeline still writes rows in offset
+  order; its old "pages overlap in flight" assertion was replaced because the
+  limiter now deliberately serialises the burst.
+
+Honest limitation: pacing cannot create quota. If the 5-minute window is shared
+with another tool using the same token or IP, downloads wait for it. The app
+reports the wait instead of failing.

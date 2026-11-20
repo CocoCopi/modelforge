@@ -124,7 +124,7 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
                     )
                 }
                 InfoRow("Last checkpoint", if (checkpoints.first > 0) "${checkpoints.first} MB" else "none")
-                InfoRow("Best checkpoint", if (checkpoints.second > 0L) "${checkpoints.second} MB" else "none")
+                InfoRow("Checkpoint", if (checkpoints.second > 0L) "${checkpoints.second} MB" else "none")
                 Text(
                     "The packed estimate uses the exact export layout. Actual files are written " +
                         "when you export from the playground. GGUF and safetensors exports are " +

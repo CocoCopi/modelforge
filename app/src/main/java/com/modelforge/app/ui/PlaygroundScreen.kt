@@ -65,7 +65,7 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
             SectionCard("Source") {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Choice(
-                        text = "Best checkpoint",
+                        text = "Checkpoint",
                         selected = state.mode == PlaygroundState.MODE_CHECKPOINT,
                         onClick = { vm.updatePlaygroundMode(PlaygroundState.MODE_CHECKPOINT) }
                     )
@@ -128,7 +128,7 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
                 } else {
                     val bestMb = vm.checkpointMegabytes(modelId).second
                     InfoRow(
-                        "Best checkpoint",
+                        "Checkpoint",
                         if (bestMb > 0) "$bestMb MB" else "missing",
                         if (bestMb > 0) ForgeColors.emberText else ForgeColors.ochreInk
                     )

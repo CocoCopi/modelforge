@@ -6,11 +6,15 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
 class HfRepositoryStructureTest {
+    @Before
+    fun resetPacing() = HfRateLimiter.reset()
+
     private val textFeature = RowFeature(
         feature_idx = 0,
         name = "text",
@@ -161,7 +165,7 @@ class HfRepositoryStructureTest {
     }
 
     @Test
-    fun full_download_fetches_pages_concurrently_in_order() = runBlocking {
+    fun full_download_fetches_pages_in_order_without_bursting() = runBlocking {
         val server = PagedServerApi(totalRows = 250)
         val repo = HfRepository(HfApiBundle(FakePublicApi(), server))
         val dest = File.createTempFile("modelforge-pages-", ".txt")
@@ -182,7 +186,10 @@ class HfRepositoryStructureTest {
             assertEquals(100, lines.size)
             assertEquals("row-0", lines.first())
             assertEquals("row-99", lines.last())
-            assertTrue("pages should overlap in flight", server.maxActive.get() > 1)
+            // Requests are paced by the shared limiter now instead of being
+            // fired 24 at a time, but the writer must still consume them in
+            // offset order.
+            assertTrue(HfRateLimiter.pacing(HfRateLimiter.VIEWER).intervalMs > 0L)
         } finally {
             dest.delete()
         }

@@ -11,7 +11,7 @@ or a packed export and can share the packed file. Models can also be exported as
 **GGUF** (F32/F16/Q4_0/Q8_0) and **safetensors** (F32/F16) for tooling and
 archival.
 
-Status: v2.3.0 production build. The repository builds and tests on GitHub
+Status: v2.4.0 production build. The repository builds and tests on GitHub
 Actions and publishes a signed release APK/AAB. See
 [Honest limitations](#honest-limitations) before relying on model quality.
 
@@ -43,9 +43,16 @@ Licence: Apache License 2.0 (see `LICENSE` and `NOTICE`).
 - **Hugging Face datasets** - search, config/split/text-column discovery,
   exact split sizes, license warnings, row/byte progress, weighted mixing,
   tokenizer training and a token-id cache. The row field has no 5,000-row cap:
-  enter any count or use **Entire split**. Downloads keep up to 24 page
-  requests in flight (64 maximum) with no artificial page delay, write pages in
-  order and stop at the split end or the free-space guard.
+  enter any count or use **Entire split**. Downloads use the repository's own
+  JSONL/CSV/TXT/JSON data files through resolver URLs, so a whole split is one
+  or two requests instead of one request per 100 rows. The dataset viewer is
+  only a fallback for parquet-only repositories.
+- **Inside your rate limit** - every Hugging Face request passes through a
+  shared, adaptive pacer: requests are spaced to fit the plan's 5-minute quota,
+  a 429 pauses every worker together and honours `Retry-After` or the
+  `RateLimit` reset header, and the pace recovers after sustained success. The
+  app stops bursting into 429s and tells you when it is deliberately slowing
+  down instead of failing the download.
 - **Corpus sized to the run** - the amount of text loaded into memory is
   derived from the step count and the free RAM (up to 128M characters) instead
   of a fixed 4M-character clamp, so a long run no longer replays the same few
@@ -131,19 +138,19 @@ Licence: Apache License 2.0 (see `LICENSE` and `NOTICE`).
   position tables from those files are ignored in favour of the new sinusoidal
   positions.
 
-## Install (v2.3.0)
+## Install (v2.4.0)
 
 1. Open [Releases](https://github.com/CocoCopi/modelforge/releases) and download
-   the latest `ModelForge-2.3.0-arm64.apk` directly.
+   the latest `ModelForge-2.4.0-arm64.apk` directly.
 2. Install it on an arm64 Android 8.0+ phone, for example
-   `adb install ModelForge-2.3.0-arm64.apk`.
+   `adb install ModelForge-2.4.0-arm64.apk`.
 3. If an older development build is installed, uninstall it once. Older CI
    builds used an ephemeral debug certificate.
 4. Allow the notification permission when prompted so training controls are
    visible in the notification shade.
 
-The release APK is signed with the project's stable release key, so v2.3.0
-updates over v2.2.0 in place and keeps your models, datasets and checkpoints.
+The release APK is signed with the project's stable release key, so v2.4.0
+updates over v2.3.0 in place and keeps your models, datasets and checkpoints.
 The matching AAB is attached for store distribution.
 
 ### AI architect troubleshooting
@@ -295,6 +302,35 @@ checkpoints. The packed file layout is mirrored exactly by
 - The Hugging Face token and NVIDIA API key, if saved, are encrypted on device
   and never written to logs or committed. All models and datasets remain in
   app-private storage. See `PRIVACY.md`.
+
+### Why an authenticated download can still be rate limited
+
+Hugging Face limits Hub API calls over a fixed 5-minute window: 500 for an
+anonymous IP, 1,000 for a signed-in free account, 2,500 for PRO. That is 3.3
+requests per second for a free account.
+
+The dataset viewer's `/rows` endpoint returns at most 100 rows per request, so a
+132,924-row download is about 1,330 requests. Sending 24 of those at once takes
+roughly 20 seconds on a normal connection - around 20,000 requests per 5-minute
+window, or 20x the quota - so the server correctly answers with 429s. Retrying
+each in-flight request on its own then produced a visible 429 every five
+seconds. The token was never the problem.
+
+ModelForge now does two things about that:
+
+1. **It downloads the data files directly.** Repositories that ship JSONL, CSV,
+   TXT or JSON are read through resolver URLs, which have their own much larger
+   budget (5,000 per 5 minutes). A whole split is one or two requests instead of
+   1,330, and long cells are no longer truncated by the preview API. The viewer
+   remains the fallback for parquet-only repositories.
+2. **It paces what is left.** A single adaptive gate per host spaces requests to
+   the plan's quota, ramps up slowly after sustained success, and on a 429 pauses
+   every worker together using `Retry-After` or the `RateLimit` reset header.
+   Nothing retries in parallel behind your back.
+
+If you still see a rate-limit message, it is because the quota is shared with
+anything else using the same token or IP in that 5-minute window. The app waits
+and retries instead of failing the download.
 
 ## Known gaps
 

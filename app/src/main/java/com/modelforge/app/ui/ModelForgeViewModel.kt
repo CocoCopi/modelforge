@@ -48,6 +48,7 @@ import com.modelforge.app.diagnostics.DiagnosticsState
 import com.modelforge.app.diagnostics.ForgeLog
 import com.modelforge.app.nativebridge.NativeModel
 import com.modelforge.app.nativebridge.PackedModel
+import com.modelforge.app.training.CheckpointHeader
 import com.modelforge.app.training.CorpusBudget
 import com.modelforge.app.training.TrainingService
 import kotlinx.coroutines.Dispatchers
@@ -114,6 +115,7 @@ data class WizardState(
     val weight: Float = 1f,
     val datasetBusy: Boolean = false,
     val datasetProgress: DownloadStats? = null,
+    val datasetNotice: String? = null,
     val datasets: List<DatasetMixEntry> = emptyList(),
     val error: String? = null
 ) {
@@ -197,6 +199,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     val aiPlanner: StateFlow<AiPlannerState> = _aiPlanner.asStateFlow()
     private val hf = HfRepository(HfClient.create { tokenStore.token }) { message ->
         _aiPlanner.update { if (it.busy) it.copy(stage = message) else it }
+        updateWizard { if (it.datasetBusy) it.copy(datasetNotice = message) else it }
     }
     private val nvidia = NvidiaClient { message ->
         _aiPlanner.update { if (it.busy) it.copy(stage = message) else it }
@@ -368,8 +371,24 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     fun liveState(id: String): TrainingLiveState? = store.loadLiveState(id)
 
     fun checkpointMegabytes(id: String): Pair<Long, Long> {
-        fun mb(file: File): Long = if (file.exists()) file.length() / (1024L * 1024L) else 0L
-        return mb(store.lastCheckpoint(id)) to mb(store.bestCheckpoint(id))
+        // Round up: a valid checkpoint smaller than 1 MB must not read as 0
+        // (the playground treated 0 as "missing").
+        fun mb(file: File): Long =
+            if (file.exists()) (file.length() + 1024L * 1024L - 1L) / (1024L * 1024L) else 0L
+        return mb(store.lastCheckpoint(id)) to mb(inferenceCheckpoint(id))
+    }
+
+    /**
+     * The checkpoint to load for testing/export. Prefer the best checkpoint,
+     * but fall back to the final one: v2.3.0 could stop before its first
+     * periodic checkpoint and leave only last.mfck behind.
+     */
+    private fun inferenceCheckpoint(id: String): File {
+        val best = store.bestCheckpoint(id)
+        if (CheckpointHeader.hasMagic(best)) return best
+        val last = store.lastCheckpoint(id)
+        if (CheckpointHeader.hasMagic(last)) return last
+        return best
     }
 
     fun targetOptions(): List<Long> {
@@ -1309,7 +1328,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         val requestedColumns = state.columns.toList()
         val requestedWeight = state.weight
         viewModelScope.launch {
-            updateWizard { it.copy(datasetBusy = true, datasetProgress = null, error = null) }
+            updateWizard { it.copy(datasetBusy = true, datasetProgress = null, datasetNotice = null, error = null) }
             try {
                 val stats = hf.downloadText(
                     datasetId = summary.id,
@@ -1348,6 +1367,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                         rowCountBusy = false,
                         datasetBusy = false,
                         datasetProgress = null,
+                        datasetNotice = null,
                         error = null
                     )
                 }
@@ -1359,6 +1379,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                     it.copy(
                         datasetBusy = false,
                         datasetProgress = null,
+                        datasetNotice = null,
                         error = t.message ?: "Download failed."
                     )
                 }
@@ -1509,11 +1530,11 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             )
             return
         }
-        val checkpoint = store.bestCheckpoint(id)
-        if (!checkpoint.exists()) {
+        val checkpoint = inferenceCheckpoint(id)
+        if (!CheckpointHeader.hasMagic(checkpoint)) {
             _identityCheck.value = IdentityCheckState(
                 modelId = id,
-                error = "No best checkpoint yet. Finish a training run first."
+                error = "No checkpoint yet. Finish or stop a training run first."
             )
             return
         }
@@ -1658,7 +1679,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             }
             return
         }
-        val checkpoint = store.bestCheckpoint(id)
+        val checkpoint = inferenceCheckpoint(id)
         val packed = store.packedFile(id, state.bits)
         if (state.mode == PlaygroundState.MODE_PACKED && !packed.exists()) {
             _playground.update {
@@ -1666,9 +1687,9 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             }
             return
         }
-        if (state.mode == PlaygroundState.MODE_CHECKPOINT && !checkpoint.exists()) {
+        if (state.mode == PlaygroundState.MODE_CHECKPOINT && !CheckpointHeader.hasMagic(checkpoint)) {
             _playground.update {
-                it.copy(error = "No best checkpoint yet. Start or finish training first.")
+                it.copy(error = "No checkpoint yet. Start or finish training first.")
             }
             return
         }
@@ -1760,10 +1781,10 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             }
             return
         }
-        val checkpoint = store.bestCheckpoint(id)
-        if (!checkpoint.exists()) {
+        val checkpoint = inferenceCheckpoint(id)
+        if (!CheckpointHeader.hasMagic(checkpoint)) {
             _playground.update {
-                it.copy(error = "No best checkpoint yet. Start or finish training first.")
+                it.copy(error = "No checkpoint yet. Start or finish training first.")
             }
             return
         }
@@ -1840,10 +1861,10 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         val state = _playground.value
         if (state.busy || state.modelId.isBlank()) return
         val id = state.modelId
-        val checkpoint = store.bestCheckpoint(id)
-        if (!checkpoint.exists()) {
+        val checkpoint = inferenceCheckpoint(id)
+        if (!CheckpointHeader.hasMagic(checkpoint)) {
             _playground.update {
-                it.copy(error = "No best checkpoint yet. Start or finish training first.")
+                it.copy(error = "No checkpoint yet. Start or finish training first.")
             }
             return
         }

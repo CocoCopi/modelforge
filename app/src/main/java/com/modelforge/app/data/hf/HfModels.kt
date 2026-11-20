@@ -118,6 +118,14 @@ data class RowEntry(
     val truncated_cells: List<String> = emptyList()
 )
 
+/** One entry of `GET /api/datasets/{id}/tree/{revision}[/{path}]`. */
+@Serializable
+data class HfTreeEntry(
+    val type: String = "",
+    val path: String = "",
+    val size: Long = 0L
+)
+
 data class DatasetConfigInfo(
     val name: String,
     val splits: List<String>,
@@ -154,8 +162,10 @@ fun describeNetworkError(t: Throwable): String {
         msg.contains("401") -> "Hugging Face rejected the credential (HTTP 401). Check the token."
         msg.contains("403") -> "Hugging Face denied access (HTTP 403). The dataset may be gated; add a valid token."
         msg.contains("404") -> "Dataset, config or split was not found (HTTP 404)."
-        msg.contains("429") -> "Hugging Face rate limit reached (HTTP 429). The app retried with " +
-            "backoff; wait a minute, add a Hugging Face token on Home for higher limits, or switch network."
+        msg.contains("429") -> "Hugging Face rate limit reached (HTTP 429). The app paces " +
+            "requests to your plan's quota and retried automatically, but the quota is still " +
+            "exhausted. Add a Hugging Face token on Home for a higher limit, or try again in " +
+            "a few minutes."
         msg.contains("timeout", ignoreCase = true) -> "The request timed out. Check the connection and retry."
         else -> "Network error: $msg"
     }
