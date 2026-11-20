@@ -24,10 +24,13 @@ Licence: Apache License 2.0 (see `LICENSE` and `NOTICE`).
 - **From-scratch C++ engine** - LayerNorm, causal multi-head attention,
   tanh-GELU MLP, tied embeddings, manual backprop, AdamW, NEON dot products and
   a persistent thread pool. The three matrix-multiply kernels are tiled and
-  vectorized (output/row blocking for the forward pass, contiguous blocked
-  accumulation for the weight gradients), and the NEON dot product uses four
-  independent accumulators so the FMA pipeline is not latency-bound. JNI
-  handles are serialized and always freed.
+  vectorized: the forward pass blocks output and row dimensions, and both
+  gradient kernels keep their accumulators in vector registers (an 8x8 tile
+  for the weight gradients, a 4x8 tile for the input gradients) instead of
+  streaming a scratch buffer for every row. The NEON dot product uses four
+  independent accumulators so the FMA pipeline is not latency-bound. Measured
+  on the development phone: about 1.3x faster per step for a 1M-parameter
+  model. JNI handles are serialized and always freed.
 - **Real training service** - foreground service with progress notification,
   pause/resume/stop actions, partial wake lock, battery/thermal auto-pause and
   auto-resume, boot resume, and atomic checkpoints. `last.mfck` keeps AdamW
@@ -40,6 +43,13 @@ Licence: Apache License 2.0 (see `LICENSE` and `NOTICE`).
   The aborted step never reaches AdamW, so the saved weights stay consistent
   with the last checkpoint. Stopping also clears the active marker immediately,
   so a stopped run is never auto-resumed when the app is reopened.
+- **A stopped model is immediately testable** - stopping always leaves a
+  loadable checkpoint: if the weights-only `best.mfck` does not exist yet (a
+  run stopped before its first periodic checkpoint), it is written from the
+  final weights. The playground, the identity check and every export fall back
+  to `last.mfck` when `best.mfck` is missing, so models trained with v2.3.0 can
+  be opened and tested without retraining. The stop message now says whether
+  the checkpoint was really written instead of always claiming it was.
 - **Hugging Face datasets** - search, config/split/text-column discovery,
   exact split sizes, license warnings, row/byte progress, weighted mixing,
   tokenizer training and a token-id cache. The row field has no 5,000-row cap:

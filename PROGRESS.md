@@ -1184,3 +1184,44 @@ majority of the instruction and story corpora the app recommends.
 Honest limitation: pacing cannot create quota. If the 5-minute window is shared
 with another tool using the same token or IP, downloads wait for it. The app
 reports the wait instead of failing.
+
+### Fix - "checkpoint missing" after stopping a run
+
+Reported: stopping training said the checkpoint was saved, but opening the
+model to test it reported a missing checkpoint.
+
+Cause: the playground, the identity check and every export read the weights-only
+`best.mfck`. That file was only written when a periodic checkpoint boundary
+happened to fall on the step with the lowest loss so far. A run stopped before
+its first boundary saved only `last.mfck`, so the app announced success while
+the file the UI loads did not exist. A second bug hid small checkpoints: the
+UI divided the file size by 1 MB and treated a valid but smaller checkpoint as
+0 MB, which it displayed as "missing".
+
+Changes (v2.4.0):
+
+- The end of a run now writes `best.mfck` when it is missing, so a stopped run
+  always leaves a file the app can load.
+- The stop message is truthful: it says the checkpoint could not be written
+  when the write failed, instead of always claiming success.
+- The playground, identity check and exports load `best.mfck` when it is valid
+  and fall back to `last.mfck` otherwise. Models trained with v2.3.0 therefore
+  become testable without retraining.
+- Checkpoint sizes are rounded up, so a checkpoint below 1 MB is no longer
+  reported as missing.
+
+### Faster steps
+
+The profile of a training step showed that the two gradient matrix multiplies
+(`dW += dout^T x` and `dX += dout W`) were about half of the step time, even
+though they do the same number of multiplications as the forward pass. Both
+used a scratch buffer that was written and read for every row, so the engine
+was moving memory instead of multiplying. They now use register tiles: an 8x8
+tile for the weight gradients and a 4x8 tile for the input gradients, with the
+accumulators kept in NEON registers. The bias gradient is summed into a
+contiguous accumulator instead of walking the matrix with a stride.
+
+Measured with both engines in one process on the development phone (1.06M
+parameters, batch 8, sequence 128): 2,620 ms/step against 3,343 ms/step for
+the previous engine, about 1.28x faster. The native test suite (gradient
+check, overfit, packed inference, concurrency, export) passes unchanged.
