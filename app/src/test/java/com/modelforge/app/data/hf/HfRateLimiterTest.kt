@@ -1,6 +1,7 @@
 package com.modelforge.app.data.hf
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -31,13 +32,40 @@ class HfRateLimiterTest {
         assertTrue("interval was ${first.intervalMs} ms", first.intervalMs >= 100L)
         assertTrue("next slot wait was ${first.waitMs} ms", first.waitMs > 0L)
 
+        val interval = first.intervalMs
         val started = now
         repeat(3) {
             HfRateLimiter.acquire(HfRateLimiter.RESOLVER, authenticated = true)
         }
         val elapsed = now - started
-        // Three gaps at the 100 ms resolver floor, with at most 20% jitter.
-        assertTrue("elapsed was $elapsed ms", elapsed in 300L..400L)
+        // Each request waits for its own reserved slot, so three requests take
+        // three intervals, plus at most 20% jitter on each. Every one of them
+        // must return: the previous version re-reserved a slot on every loop
+        // pass, so the second request never came back.
+        assertTrue("elapsed was $elapsed ms for a $interval ms interval", elapsed >= 3 * interval)
+        assertTrue(
+            "elapsed was $elapsed ms for a $interval ms interval",
+            elapsed <= 3 * (interval + interval / 5L + 2L)
+        )
+    }
+
+    @Test
+    fun many_requests_each_get_their_turn_and_return() = runBlocking {
+        // Regression guard. Reserving a slot used to be followed by a re-check
+        // that reserved another slot, so the second request waited forever and
+        // every download stalled. 200 requests must all come back.
+        withTimeout(30_000L) {
+            HfRateLimiter.acquire(HfRateLimiter.RESOLVER, authenticated = true)
+            val intervalMs = HfRateLimiter.pacing(HfRateLimiter.RESOLVER).intervalMs
+            val started = now
+            repeat(199) { HfRateLimiter.acquire(HfRateLimiter.RESOLVER, authenticated = true) }
+            val elapsed = now - started
+            assertTrue("199 requests took $elapsed ms", elapsed >= 199 * intervalMs)
+            assertTrue(
+                "199 requests took $elapsed ms for a $intervalMs ms interval",
+                elapsed <= 199 * (intervalMs + intervalMs / 5L + 2L)
+            )
+        }
     }
 
     @Test

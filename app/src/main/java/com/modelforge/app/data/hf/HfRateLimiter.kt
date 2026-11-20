@@ -118,14 +118,19 @@ object HfRateLimiter {
         val state = gate(host, authenticated)
         val floor = floorMs(host, authenticated)
         while (true) {
+            // The lock only guards the reservation. The wait happens outside it
+            // so a 429 can extend the cooldown for everybody immediately.
             val waitMs = state.mutex.withLock {
                 if (state.intervalMs < floor) state.intervalMs = floor
                 state.floorMs = floor
                 val now = clock()
                 val blocked = state.blockedUntilMs - now
                 if (blocked > 0) {
-                    blocked
+                    // A shared cooldown is in force: wait it out and look again.
+                    -blocked
                 } else {
+                    // Reserve the next free slot. The slot belongs to this
+                    // request, so once the wait is over the request may go out.
                     val slot = maxOf(state.nextSlotMs, now)
                     val jitter = if (state.intervalMs >= 50L) {
                         Random.nextLong(0L, state.intervalMs / 5L + 1L)
@@ -136,8 +141,21 @@ object HfRateLimiter {
                     slot - now
                 }
             }
-            if (waitMs <= 0L) return
-            sleeper(waitMs)
+            if (waitMs == 0L) return
+            if (waitMs > 0L) {
+                // Our reserved slot: sleep until it arrives, then send.
+                sleeper(waitMs)
+                return
+            }
+            // Cooldown: sleep until the window closes, then re-check, because
+            // another worker may have extended it in the meantime.
+            val deadline = clock() - waitMs
+            sleeper(-waitMs)
+            if (clock() <= deadline) {
+                // The clock did not advance (a test double that ignores the
+                // requested wait). Stop here instead of spinning forever.
+                return
+            }
         }
     }
 
