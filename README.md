@@ -270,6 +270,44 @@ Recorded from host builds in `PROGRESS.md`; they are not marketing estimates.
 The fp32 weights-only checkpoint for that model is about 289 KB, so the 4-bit
 export is roughly 4.3x smaller.
 
+## Release v2.4.0
+
+- `ModelForge-2.4.0-arm64.apk` (arm64-v8a, minSdk 26, 3,591,955 bytes)
+  SHA-256 `7e851b3bb90a98cab9a56fcc48f192fd70f3ff7b180728d0cb8afd47a050ee99`
+- `ModelForge-2.4.0.aab` (5,444,226 bytes)
+  SHA-256 `2d453ecc6d6f8d7f99e3fb8daf6906f77a916a355a1d414af2ef099978f55755`
+- Signed with the stable release key (certificate
+  `9404779bafb23186d800e28cf0d4f6ad67fc95a15d613e000caaf53bc6b03490`, unchanged
+  from v2.3.0), so it updates in place.
+- CI run 44786838503 green: host C++ tests, JVM tests, Paparazzi, debug APK,
+  signed release APK/AAB and the x86_64 emulator job.
+
+### What changed in v2.4.0
+
+**"Rate limited every 5 seconds" is fixed.** Dataset repository files
+(JSONL/JSON/CSV/TSV/TXT, optionally gzipped) are now downloaded straight
+through resolver URLs, so a 100k-row corpus is one file request instead of a
+thousand viewer calls. The viewer stays as the fallback for parquet-only
+repositories. On top of that, every request now passes through one adaptive
+pacing gate per host: requests are spaced to the published quota, a 429 pauses
+every worker together and honours `Retry-After`/`RateLimit`, and failures are
+retried three times before a visible Retry button appears.
+
+**Stopping a run no longer leaves a checkpoint you cannot test.** A run stopped
+before its first periodic checkpoint saved only `last.mfck`, while the
+playground, the identity check and every exporter read `best.mfck`; the app
+therefore claimed success while the file it loads did not exist. `best.mfck` is
+now written whenever it is missing, the stop message reports the truth when the
+write fails, and every reader falls back to `last.mfck`. Checkpoint sizes are
+rounded up, so a checkpoint below 1 MB is no longer displayed as missing.
+
+**Steps are faster.** Profiling a training step showed the two gradient matrix
+multiplies spending about half the step moving scratch memory instead of
+multiplying. They now keep their accumulators in NEON registers (an 8x8 tile for
+the weight gradients, a 4x8 tile for the input gradients) and the bias gradient
+is summed contiguously: measured 2,620 ms/step against 3,343 ms/step for the
+previous engine, about 1.28x faster for a 1M-parameter model.
+
 ## Release v2.3.0
 
 - `ModelForge-2.3.0-arm64.apk` (arm64-v8a, minSdk 26, 3,574,627 bytes)

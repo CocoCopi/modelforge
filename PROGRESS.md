@@ -1225,3 +1225,34 @@ Measured with both engines in one process on the development phone (1.06M
 parameters, batch 8, sequence 128): 2,620 ms/step against 3,343 ms/step for
 the previous engine, about 1.28x faster. The native test suite (gradient
 check, overfit, packed inference, concurrency, export) passes unchanged.
+
+### Fix - the request pacer waited forever after reserving a slot
+
+The first CI runs of v2.4.0 stalled in the unit-test step for over twenty
+minutes without producing a log, and a thread dump of the Gradle test worker
+showed `HfRateLimiterTest.requests_are_spaced_instead_of_bursting` spinning
+inside `HfRateLimiter.acquire`.
+
+Cause: `acquire` reserved the next free slot under the mutex, slept until it
+arrived, and then looped back to the top of the `while (true)`. The re-check
+reserved a *new* slot instead of sending the request, so the wait for the second
+request never fell to zero. This was not a test artefact: every dataset download
+hangs after its first request, which is precisely the "rate limited every 5
+seconds" symptom for a user with a slow connection.
+
+Fix: the wait for a reserved slot now returns as soon as the slot arrives. Only
+a shared cooldown re-checks the clock, because another worker may have extended
+the window while this one was asleep; a cooldown whose clock does not advance
+(a test double that ignores the requested wait) stops instead of spinning.
+
+Verified by the rate limiter tests plus the search/download integration test
+against the live Hub; both pass, and CI run 44786838503 finished in 5m23s.
+
+### Release v2.4.0
+
+- `ModelForge-2.4.0-arm64.apk` (3,591,955 bytes)
+  SHA-256 `7e851b3bb90a98cab9a56fcc48f192fd70f3ff7b180728d0cb8afd47a050ee99`
+- `ModelForge-2.4.0.aab` (5,444,226 bytes)
+  SHA-256 `2d453ecc6d6f8d7f99e3fb8daf6906f77a916a355a1d414af2ef099978f55755`
+- Signing certificate `9404779b...4b03490`, unchanged since v2.2.0.
+- CI run 44786838503.
