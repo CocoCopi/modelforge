@@ -2,10 +2,12 @@ package com.modelforge.app.data.hf
 
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeNoException
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import java.io.File
@@ -14,15 +16,22 @@ import java.io.File
  * Hits the real Hugging Face APIs. This is deliberately an integration test: it
  * proves search, metadata, splits and page downloads work against real data.
  *
- * The Hub answers shared CI addresses with 429s from time to time. Waiting out
- * a rate-limit window would stall the whole build for minutes, so the test
- * runs on a controllable clock (a throttled window elapses at once) and skips
- * instead of failing when the runner is throttled.
+ * It is opt-in: shared CI addresses are regularly answered with 429s or are
+ * simply slow to reach the Hub, and a stalled network call must not hold the
+ * whole build hostage. Run it locally with MF_LIVE_HF_TESTS=1.
  */
 class HfRepositoryIntegrationTest {
 
     private val repo = HfRepository()
     private var fakeNow = System.currentTimeMillis()
+
+    @Before
+    fun requiresOptIn() {
+        assumeTrue(
+            "Live Hugging Face tests are opt-in (MF_LIVE_HF_TESTS=1)",
+            System.getenv("MF_LIVE_HF_TESTS") == "1"
+        )
+    }
 
     @Before
     fun installFastClock() {
@@ -73,7 +82,7 @@ class HfRepositoryIntegrationTest {
     @Test
     fun searchAndDownloadRealDataset() = runBlocking {
         try {
-            runSearchAndDownload()
+            withTimeout(120_000L) { runSearchAndDownload() }
         } catch (t: Throwable) {
             if (isRateLimited(t)) {
                 assumeNoException("Hugging Face rate limited this runner", t)
