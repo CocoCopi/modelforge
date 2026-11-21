@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -128,6 +129,40 @@ struct ForwardCache {
 };
 
 // ---------------------------------------------------------------------------
+// Incremental decoding
+// ---------------------------------------------------------------------------
+
+// Per-layer key/value history for autoregressive decoding. The old generator
+// recomputed the whole prefix for every token, which made a 100-token answer
+// cost thousands of forward passes. Prefill runs once at full batch speed and
+// each new token then costs a single-row pass.
+struct KvCache {
+    int length = 0;
+    std::vector<Tensor> keys;    // [layers][context, d]
+    std::vector<Tensor> values;
+
+    void reset(int layer_count, int context, int d) {
+        length = 0;
+        keys.assign(static_cast<size_t>(layer_count), Tensor{});
+        values.assign(static_cast<size_t>(layer_count), Tensor{});
+        for (int l = 0; l < layer_count; ++l) {
+            keys[static_cast<size_t>(l)].ensure(context, d);
+            values[static_cast<size_t>(l)].ensure(context, d);
+        }
+    }
+
+    void release() {
+        length = 0;
+        keys.clear();
+        values.clear();
+    }
+};
+
+// Return false from the callback to stop generating. The tokens produced so
+// far are still returned, so a cancelled answer is never lost.
+using TokenCallback = std::function<bool(int)>;
+
+// ---------------------------------------------------------------------------
 // GPT model
 // ---------------------------------------------------------------------------
 
@@ -154,7 +189,7 @@ public:
 
     std::vector<int> generate(const std::vector<int>& prompt, int max_new,
                               float temperature, int top_k, float top_p,
-                              uint64_t seed = 42);
+                              uint64_t seed = 42, TokenCallback on_token = nullptr);
 
     bool save_checkpoint(const std::string& path, bool with_optimizer) const;
     bool load_checkpoint(const std::string& path, bool with_optimizer);
@@ -184,6 +219,7 @@ public:
 
     long long step() const { return step_; }
     void set_step(long long s) { step_ = s; }
+    void reset_optimizer() { adam_step_ = 0; }
 
     // Cooperative stop for training. A phone step can take seconds, so the
     // service asks the engine to abandon the current step at the next layer
@@ -204,6 +240,11 @@ public:
 private:
     void forward_logits(const int* tokens, int B, int T);
     void init_params();
+
+    // Full-prefix prefill followed by single-token steps. Both leave the
+    // logits for the most recent token in cache_.logits.
+    void prefill_kv(const int* tokens, int T, KvCache& kv);
+    const float* decode_kv(int token, KvCache& kv);
 
     ModelConfig cfg_;
     Param wte_, lnf_g_, lnf_b_;
@@ -263,9 +304,12 @@ public:
 
     std::vector<int> generate(const std::vector<int>& prompt, int max_new,
                               float temperature, int top_k, float top_p,
-                              uint64_t seed = 42) const;
+                              uint64_t seed = 42, TokenCallback on_token = nullptr) const;
 
 private:
+    void prefill_kv(const int* tokens, int T, KvCache& kv) const;
+    const float* decode_kv(int token, KvCache& kv) const;
+
     ModelConfig cfg_;
     int bits_ = 0;
     int group_ = 32;

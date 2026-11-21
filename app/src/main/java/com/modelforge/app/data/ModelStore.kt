@@ -36,6 +36,13 @@ class ModelStore(context: Context) {
     fun lastCheckpoint(id: String): File = File(checkpointsDir(id), "last.mfck")
     fun bestCheckpoint(id: String): File = File(checkpointsDir(id), "best.mfck")
     fun recoveryCheckpoint(id: String): File = File(checkpointsDir(id), "recovery.mfck")
+
+    /**
+     * Weights donated by the previous version in a series. Training only reads
+     * this when the model has no checkpoint of its own yet, and starts a fresh
+     * run at step 0 with fresh AdamW moments.
+     */
+    fun initCheckpoint(id: String): File = File(checkpointsDir(id), "init.mfck")
     fun packedDir(id: String): File = File(modelDir(id), "packed").apply { mkdirs() }
     fun packedFile(id: String, bits: Int): File = File(packedDir(id), "model_q$bits.mfpk")
     fun dataDir(id: String): File = File(modelDir(id), "data").apply { mkdirs() }

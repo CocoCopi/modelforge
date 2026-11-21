@@ -814,6 +814,28 @@ class TrainingService : Service() {
         run.resumedWithRecovery = selected != null && selected != last
 
         if (model == null) {
+            // A forked series version has no checkpoint of its own yet, but it
+            // carries the previous version's weights. Start a genuinely new run:
+            // step 0, fresh AdamW moments, same architecture and tokenizer.
+            val init = store.initCheckpoint(manifest.id)
+            if (CheckpointHeader.hasMagic(init)) {
+                val seeded = runCatching {
+                    NativeModel.load(init.absolutePath, withOptimizer = false)
+                }.getOrNull()
+                val matches = seeded?.config?.let { c ->
+                    c.vocabSize == cfg.vocabSize && c.contextLength == cfg.contextLength &&
+                        c.dModel == cfg.dModel && c.layers == cfg.layers && c.heads == cfg.heads &&
+                        c.dFf == cfg.dFf && c.tiedEmbeddings == cfg.tiedEmbeddings
+                } == true
+                if (seeded != null && matches) {
+                    seeded.resetStep()
+                    model = seeded
+                } else {
+                    seeded?.close()
+                }
+            }
+        }
+        if (model == null) {
             model = NativeModel.create(cfg, System.nanoTime())
                 ?: throw TrainingFailure(
                     "The model could not be allocated.",

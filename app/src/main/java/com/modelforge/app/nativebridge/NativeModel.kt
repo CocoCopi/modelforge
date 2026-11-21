@@ -73,6 +73,34 @@ class NativeModel private constructor(
             ?: IntArray(0)
     }
 
+    /**
+     * KV-cached decoding with a per-token callback. The callback runs on the
+     * calling thread, so it can update UI state and honour cancellation without
+     * a second native session or a polling loop.
+     */
+    @Synchronized
+    fun generateStreaming(
+        prompt: IntArray,
+        maxNew: Int,
+        temperature: Float,
+        topK: Int,
+        topP: Float,
+        seed: Long = System.nanoTime(),
+        onToken: (Int) -> Boolean
+    ): IntArray {
+        check(handle != 0L) { "Model is closed" }
+        return NativeBridge.nativeGenerateStream(
+            handle, prompt, maxNew, temperature, topK, topP, seed,
+            NativeBridge.TokenListener(onToken)
+        ) ?: IntArray(0)
+    }
+
+    /** Restarts progress and AdamW bias correction for a forked version. */
+    @Synchronized
+    fun resetStep() {
+        if (handle != 0L) NativeBridge.nativeSetStep(handle, 0L)
+    }
+
     @Synchronized
     fun setQuantization(bits: Int, group: Int = 32) {
         check(handle != 0L) { "Model is closed" }

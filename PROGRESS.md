@@ -1256,3 +1256,28 @@ against the live Hub; both pass, and CI run 44786838503 finished in 5m23s.
   SHA-256 `2d453ecc6d6f8d7f99e3fb8daf6906f77a916a355a1d414af2ef099978f55755`
 - Signing certificate `9404779b...4b03490`, unchanged since v2.2.0.
 - CI run 44786838503.
+
+## v2.4.1 - streaming generation, series, Bench and cloud package
+
+Status: IN PROGRESS (tagged for CI release).
+
+- Generation now prefills once and decodes with a per-layer KV cache; the JNI
+  streaming callback reports each token and honours cancellation between
+  tokens. `test_decode` proves greedy and re-windowed output matches the old
+  full recompute exactly; the other six native suites still pass.
+- Training speed: `bench_matmul` on the ARM64 host measures 1.27-1.35x on the
+  large training matrices after the size-selective 4x4 NEON register tile;
+  small matrices keep the previous kernel. Positional frequencies are cached
+  per model width in a reference-stable deque.
+- Series: manifests carry `seriesId`, `seriesVersion` and `parentId`. A forked
+  version is seeded from the parent's best checkpoint (`init.mfck`) with step
+  and AdamW counters reset; the tokenizer is copied so vocabularies match.
+  "Train longer" uses the existing extend path with a user-chosen step count.
+- Bench integration: read-only `ModelsProvider` behind the dangerous
+  `READ_MODELS` permission, with the column names Bench's client expects.
+- Cloud: `mf_train` host CLI (verified end to end on synthetic MFTK data) and a
+  generated Colab notebook that builds it and mirrors progress/checkpoints to
+  Drive. Notebook JSON is validated by a JVM unit test; no credentials, no
+  undocumented Colab endpoints.
+- Bench 1.0.0 was released from its own repository:
+  https://github.com/CocoCopi/ModelForge-Bench/releases/tag/v1.0.0

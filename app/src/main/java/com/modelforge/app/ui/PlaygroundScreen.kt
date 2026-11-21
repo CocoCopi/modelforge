@@ -313,22 +313,67 @@ fun PlaygroundScreen(vm: ModelForgeViewModel, modelId: String) {
                     valueRange = 0.05f..1f,
                     steps = 18
                 )
-                ForgeButton(
-                    if (state.mode == PlaygroundState.MODE_PACKED) "Generate from packed" else "Generate",
-                    onClick = vm::generatePlayground,
-                    enabled = !state.busy && state.prompt.isNotBlank(),
-                    modifier = Modifier.fillMaxWidth(),
-                    primary = true
-                )
-                if (state.busy) {
-                    Text("generating…", style = ForgeType.mono, color = ForgeColors.emberText)
-                    if (state.status.isNotBlank()) {
+                if (state.trainingContention) {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(ForgeColors.inkWash)
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         Text(
-                            state.status,
+                            "Training is using the same cores, so this answer will be slower. " +
+                                "Pause training for a fair speed reading.",
                             style = MaterialTheme.typography.bodySmall,
-                            color = ForgeColors.verdigris
+                            color = ForgeColors.ochreInk
+                        )
+                        ForgeOutlineButton(
+                            "Pause training while I test",
+                            onClick = vm::pauseTraining,
+                            modifier = Modifier.fillMaxWidth()
                         )
                     }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    ForgeButton(
+                        if (state.mode == PlaygroundState.MODE_PACKED) "Generate from packed" else "Generate",
+                        onClick = vm::generatePlayground,
+                        enabled = !state.busy && state.prompt.isNotBlank(),
+                        modifier = Modifier.weight(1f),
+                        primary = true
+                    )
+                    if (state.busy) {
+                        ForgeOutlineButton(
+                            "Stop",
+                            onClick = vm::cancelPlayground,
+                            modifier = Modifier.weight(0.6f)
+                        )
+                    }
+                }
+                if (state.busy) {
+                    androidx.compose.material3.LinearProgressIndicator(
+                        progress = (state.generatedTokens.toFloat() /
+                            state.maxNew.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f),
+                        modifier = Modifier.fillMaxWidth(),
+                        color = ForgeColors.emberText,
+                        trackColor = ForgeColors.inkWash
+                    )
+                    Text(
+                        state.status.ifBlank { "Decoding…" },
+                        style = ForgeType.mono,
+                        color = ForgeColors.emberText
+                    )
+                    Text(
+                        "Text appears as it is decoded. Stop keeps the partial answer.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ForgeColors.inkMuted
+                    )
+                } else if (state.status.isNotBlank()) {
+                    Text(
+                        state.status,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (state.cancelled) ForgeColors.ochreInk else ForgeColors.verdigris
+                    )
                 }
             }
 

@@ -3,21 +3,53 @@
 Train, quantize and test a small language model entirely on an Android phone.
 
 ModelForge is a from-scratch GPT implementation (C++ engine, Kotlin/Compose UI).
-There is no cloud training and no downloaded model weights: the app builds a
-byte-level BPE tokenizer, trains the network on data from Hugging Face, runs
-quantization-aware training, writes checkpoints, and exports packed 2/3/4/8-bit
-models. The playground generates text from either the full-precision checkpoint
-or a packed export and can share the packed file. Models can also be exported as
-**GGUF** (F32/F16/Q4_0/Q8_0) and **safetensors** (F32/F16) for tooling and
-archival.
+The app builds a byte-level BPE tokenizer, trains the network on data from
+Hugging Face, runs quantization-aware training, writes checkpoints, and exports
+packed 2/3/4/8-bit models. The playground streams text from either the
+full-precision checkpoint or a packed export and can share the packed file.
+Models can also be exported as **GGUF** (F32/F16/Q4_0/Q8_0) and **safetensors**
+(F32/F16) for tooling and archival.
 
-Status: v2.4.0 production build. The repository builds and tests on GitHub
+Optional companions, both user-driven rather than hidden automation:
+
+- **ModelForge Bench** (`com.modelforge.bench`) evaluates a copied model fully
+  offline and produces scored reports. ModelForge exposes models to it through
+  a read-only, permission-guarded `ContentProvider`.
+- **Colab cloud training** exports a package with the token cache, tokenizer,
+  starting weights and a generated notebook. The notebook builds this same
+  engine, trains on a Colab CPU and mirrors progress and checkpoints to Google
+  Drive. The app never logs in to a Google account and cannot start or stop a
+  Colab session.
+
+Status: v2.4.1 production build. The repository builds and tests on GitHub
 Actions and publishes a signed release APK/AAB. See
 [Honest limitations](#honest-limitations) before relying on model quality.
 
 Licence: Apache License 2.0 (see `LICENSE` and `NOTICE`).
 
 ## Features
+
+- **Streaming, KV-cached generation** - prefill runs once at full batch speed
+  and each new token then costs a single-row pass, instead of recomputing the
+  whole prefix per token. Text appears as it is decoded with live token counts
+  and measured tokens/second, and **Stop** returns the partial answer. The
+  native `test_decode` suite proves the fast path produces exactly the same
+  tokens as full recomputation, including across a sliding context window.
+- **Series versions and longer runs** - "Train longer" adds exactly the number
+  of extra steps you choose, resuming weights and AdamW state. "New version in
+  this series" pre-fills the wizard from the parent, copies its best weights and
+  tokenizer, and starts a fresh run at step 0 with any dataset mix, step count
+  and name, so v1 and v2 stay independently evaluable.
+- **Faster training kernels** - the forward projection uses a size-selective
+  4x4 NEON register tile (16 independent accumulators, 16 FMAs per 8 vector
+  loads) alongside the original dot-product tiling, and positional frequencies
+  are cached per model width instead of recomputed with `pow()` per token.
+  Measured on an ARM64 host with `bench_matmul`: 1.27-1.35x on the large
+  training matrices, with the small-matrix path unchanged.
+- **Read-only model provider** - `com.modelforge.app.models` serves manifests,
+  tokenizers, checkpoints, packed exports and held-out corpus files to Bench
+  under the dangerous `com.modelforge.app.permission.READ_MODELS` permission.
+  Nothing is writable through it.
 
 - **On-device architecture search** - `ConfigDeriver` finds a GPT shape within
   5% of a requested parameter target, capped by measured RAM/CPU limits.
@@ -118,6 +150,16 @@ Licence: Apache License 2.0 (see `LICENSE` and `NOTICE`).
 
 ## Honest limitations
 
+- The Colab notebook trains on a **CPU** runtime: the engine has no CUDA/NNAPI
+  backend, so a GPU runtime will not speed it up. Free Colab sessions are
+  controlled by Google and can disconnect; the notebook mirrors checkpoints to
+  Drive, and the app imports whatever completed. There is no supported consumer
+  Colab API for starting sessions or streaming logs, so ModelForge does not
+  pretend to automate one.
+- The speedups above are kernel-level measurements on an ARM64 host, not a
+  promise of a specific step time on your phone. Thermals, big.LITTLE
+  scheduling and memory bandwidth still dominate a multi-hour run.
+
 - These are tiny models trained from scratch on a phone. Expect short, simple
   text with repetition and grammar mistakes, not chatbot-level answers.
 - Release APKs are `arm64-v8a` only. Debug/CI builds also include `x86_64` so the emulator test job can run; no 32-bit build is produced.
@@ -148,12 +190,12 @@ Licence: Apache License 2.0 (see `LICENSE` and `NOTICE`).
   position tables from those files are ignored in favour of the new sinusoidal
   positions.
 
-## Install (v2.4.0)
+## Install (v2.4.1)
 
 1. Open [Releases](https://github.com/CocoCopi/modelforge/releases) and download
-   the latest `ModelForge-2.4.0-arm64.apk` directly.
+   the latest `ModelForge-2.4.1-arm64.apk` directly.
 2. Install it on an arm64 Android 8.0+ phone, for example
-   `adb install ModelForge-2.4.0-arm64.apk`.
+   `adb install ModelForge-2.4.1-arm64.apk`.
 3. If an older development build is installed, uninstall it once. Older CI
    builds used an ephemeral debug certificate.
 4. Allow the notification permission when prompted so training controls are

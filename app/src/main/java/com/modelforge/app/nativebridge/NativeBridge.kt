@@ -5,6 +5,15 @@ package com.modelforge.app.nativebridge
  * Higher-level code should use NativeEngine instead of calling this directly.
  */
 object NativeBridge {
+
+    /**
+     * Receives each token as it is decoded. Returning false stops generation;
+     * the tokens produced so far are still returned to the caller.
+     */
+    fun interface TokenListener {
+        fun onToken(token: Int): Boolean
+    }
+
     init {
         System.loadLibrary("modelforge")
     }
@@ -48,6 +57,8 @@ object NativeBridge {
 
     external fun nativeClearStop(handle: Long)
 
+    external fun nativeSetStep(handle: Long, step: Long)
+
     external fun nativeSetQAT(handle: Long, bits: Int, group: Int)
 
     external fun nativeGenerate(
@@ -58,6 +69,17 @@ object NativeBridge {
         topK: Int,
         topP: Float,
         seed: Long
+    ): IntArray?
+
+    external fun nativeGenerateStream(
+        handle: Long,
+        prompt: IntArray,
+        maxNew: Int,
+        temperature: Float,
+        topK: Int,
+        topP: Float,
+        seed: Long,
+        listener: TokenListener?
     ): IntArray?
 
     external fun nativeSaveCheckpoint(handle: Long, path: String, withOptimizer: Boolean): Boolean
@@ -86,6 +108,17 @@ object NativeBridge {
         topK: Int,
         topP: Float,
         seed: Long
+    ): IntArray?
+
+    external fun nativePackedGenerateStream(
+        handle: Long,
+        prompt: IntArray,
+        maxNew: Int,
+        temperature: Float,
+        topK: Int,
+        topP: Float,
+        seed: Long,
+        listener: TokenListener?
     ): IntArray?
 
     fun version(): String = nativeVersion()

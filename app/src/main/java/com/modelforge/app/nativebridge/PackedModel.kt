@@ -34,6 +34,23 @@ class PackedModel private constructor(
     }
 
     @Synchronized
+    fun generateStreaming(
+        prompt: IntArray,
+        maxNew: Int,
+        temperature: Float,
+        topK: Int,
+        topP: Float,
+        seed: Long = System.nanoTime(),
+        onToken: (Int) -> Boolean
+    ): IntArray {
+        check(handle != 0L) { "Packed model is closed" }
+        return NativeBridge.nativePackedGenerateStream(
+            handle, prompt, maxNew, temperature, topK, topP, seed,
+            NativeBridge.TokenListener(onToken)
+        ) ?: IntArray(0)
+    }
+
+    @Synchronized
     override fun close() {
         if (handle != 0L) {
             NativeBridge.nativePackedFree(handle)

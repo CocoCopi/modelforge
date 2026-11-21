@@ -1,5 +1,9 @@
 package com.modelforge.app.ui
 
+import android.content.Intent
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -9,6 +13,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -213,6 +218,146 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
                         }
                     }
                 }
+            }
+
+            val cloudMessage = remember { mutableStateOf<String?>(null) }
+            val checkpointPicker = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocument()
+            ) { uri ->
+                uri?.let { selected ->
+                    vm.importCloudCheckpoint(modelId, selected) { _, message ->
+                        cloudMessage.value = message
+                    }
+                }
+            }
+            val progressPicker = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocument()
+            ) { uri ->
+                uri?.let { selected ->
+                    vm.readCloudProgress(selected) { message -> cloudMessage.value = message }
+                }
+            }
+            SectionCard("Cloud training · Colab") {
+                Text(
+                    "Free path: export a package, run the generated notebook in your own Colab " +
+                        "session, then import the checkpoint from Google Drive. Use a CPU runtime; " +
+                        "the engine is CPU-only. The app never logs in to your Google account, " +
+                        "so it cannot start or stop a session for you.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ForgeColors.inkMuted
+                )
+                ForgeOutlineButton(
+                    "Export Colab package",
+                    onClick = {
+                        cloudMessage.value = "Writing the package…"
+                        vm.exportCloudPackage(modelId) { file, error ->
+                            if (file != null) {
+                                cloudMessage.value = "Package ready. Upload it to Drive, then open the notebook in Colab."
+                                shareFile(context, file, "application/zip")
+                            } else {
+                                cloudMessage.value = error
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                ForgeOutlineButton(
+                    "Open Colab",
+                    onClick = {
+                        runCatching {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse("https://colab.research.google.com/"))
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                ForgeOutlineButton(
+                    "Import cloud checkpoint (.mfck)",
+                    onClick = { checkpointPicker.launch(arrayOf("*/*")) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                ForgeOutlineButton(
+                    "Read cloud progress (progress.json)",
+                    onClick = { progressPicker.launch(arrayOf("*/*")) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                cloudMessage.value?.let { message ->
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ForgeColors.verdigris
+                    )
+                }
+            }
+
+            SectionCard("Train longer") {
+                var extraSteps by remember { mutableStateOf(500f) }
+                Text(
+                    "Resume from the latest checkpoint with weights and AdamW state intact. " +
+                        "The dataset mix stays the same; use a new version to change data or name.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ForgeColors.inkMuted
+                )
+                Text(
+                    "${extraSteps.toInt()} extra steps",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = ForgeColors.emberText
+                )
+                Slider(
+                    value = extraSteps,
+                    onValueChange = { extraSteps = it },
+                    valueRange = 50f..5000f,
+                    steps = 98,
+                    enabled = !active
+                )
+                ForgeOutlineButton(
+                    "Train ${extraSteps.toInt()} more steps",
+                    onClick = { vm.extendTraining(modelId, extraSteps.toInt()) },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !active
+                )
+                if (active) {
+                    Text(
+                        "Stop the current run before extending it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ForgeColors.ochreInk
+                    )
+                }
+            }
+
+            val series = remember(modelId) { vm.seriesFor(modelId) }
+            SectionCard("Series · version ${manifest.seriesVersion}") {
+                if (series.size <= 1) {
+                    Text(
+                        "This is the first version. A new version starts from this model's " +
+                            "best weights and tokenizer, then lets you add datasets and choose " +
+                            "any step count.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ForgeColors.inkMuted
+                    )
+                } else {
+                    series.forEach { version ->
+                        ForgeOutlineButton(
+                            "v${version.seriesVersion} · ${version.name}" +
+                                if (version.id == modelId) " (this model)" else "",
+                            onClick = { vm.openModel(version.id) },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = version.id != modelId
+                        )
+                    }
+                }
+                ForgeOutlineButton(
+                    "New version in this series",
+                    onClick = { vm.startNextVersion(modelId) },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !active
+                )
+                Text(
+                    "Evaluate versions in ModelForge Bench to compare accuracy, speed and cost.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ForgeColors.verdigris
+                )
             }
 
             SectionCard("Actions") {

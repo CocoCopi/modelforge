@@ -13,6 +13,14 @@
 
     <uses-feature android:name="android.hardware.ram.low" android:required="false" />
 
+    <!-- Read-only model access for ModelForge Bench. The user grants this once;
+         no other app can read models without it. -->
+    <permission
+        android:name="com.modelforge.app.permission.READ_MODELS"
+        android:label="@string/read_models_permission_label"
+        android:description="@string/read_models_permission_description"
+        android:protectionLevel="dangerous" />
+
     <application
         android:name=".ModelForgeApp"
         android:allowBackup="false"
@@ -69,5 +77,13 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <provider
+            android:name=".provider.ModelsProvider"
+            android:authorities="com.modelforge.app.models"
+            android:enabled="true"
+            android:exported="true"
+            android:grantUriPermissions="false"
+            android:permission="com.modelforge.app.permission.READ_MODELS" />
+
     </application>
 </manifest>

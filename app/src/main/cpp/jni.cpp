@@ -33,6 +33,76 @@ bool read_ints(JNIEnv* env, jintArray arr, std::vector<int>& out) {
     return true;
 }
 
+struct StreamState {
+    JNIEnv* env = nullptr;
+    jobject listener = nullptr;
+    jmethodID method = nullptr;
+    bool ok = false;
+};
+
+StreamState make_stream(JNIEnv* env, jobject listener) {
+    StreamState state;
+    state.env = env;
+    if (listener == nullptr) {
+        state.ok = true;
+        return state;
+    }
+    jclass cls = env->GetObjectClass(listener);
+    if (cls == nullptr) return state;
+    state.method = env->GetMethodID(cls, "onToken", "(I)Z");
+    env->DeleteLocalRef(cls);
+    if (state.method == nullptr) {
+        env->ExceptionClear();
+        return state;
+    }
+    state.listener = listener;
+    state.ok = true;
+    return state;
+}
+
+bool stream_token(StreamState& state, int token) {
+    if (state.listener == nullptr) return true;
+    const jboolean cont = state.env->CallBooleanMethod(
+        state.listener, state.method, static_cast<jint>(token));
+    if (state.env->ExceptionCheck()) {
+        // A Kotlin exception must not unwind through the C++ engine. The
+        // partial answer is returned instead of crashing the playground.
+        state.env->ExceptionClear();
+        return false;
+    }
+    return cont == JNI_TRUE;
+}
+
+template <typename Model>
+jintArray generate_streaming(JNIEnv* env, Model* m, jintArray prompt, jint max_new,
+                             jfloat temperature, jint top_k, jfloat top_p,
+                             jlong seed, jobject listener) {
+    if (m == nullptr) return nullptr;
+    StreamState stream = make_stream(env, listener);
+    if (!stream.ok) return nullptr;
+    try {
+        std::vector<int> p;
+        if (!read_ints(env, prompt, p)) return nullptr;
+        for (int& v : p) {
+            if (v < 0) v = 0;
+            if (v >= m->config().vocab) v = m->config().vocab - 1;
+        }
+        const auto out = m->generate(p, max_new, temperature, top_k, top_p,
+                                     static_cast<uint64_t>(seed),
+                                     [&stream](int token) {
+                                         return stream_token(stream, token);
+                                     });
+        jintArray result = env->NewIntArray(static_cast<jsize>(out.size()));
+        if (result && !out.empty()) {
+            env->SetIntArrayRegion(result, 0, static_cast<jsize>(out.size()),
+                                   reinterpret_cast<const jint*>(out.data()));
+        }
+        return result;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
 } // namespace
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -132,6 +202,16 @@ Java_com_modelforge_app_nativebridge_NativeBridge_nativeStep(JNIEnv* /*env*/, jo
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_modelforge_app_nativebridge_NativeBridge_nativeSetStep(
+    JNIEnv* /*env*/, jobject /*thiz*/, jlong handle, jlong step) {
+    GPT* m = from_handle(handle);
+    if (m) {
+        m->set_step(static_cast<long long>(step));
+        m->reset_optimizer();
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_modelforge_app_nativebridge_NativeBridge_nativeSetQAT(JNIEnv* /*env*/, jobject /*thiz*/,
                                                                jlong handle, jint bits, jint group) {
     GPT* m = from_handle(handle);
@@ -162,6 +242,15 @@ Java_com_modelforge_app_nativebridge_NativeBridge_nativeGenerate(
     } catch (...) {
         return nullptr;
     }
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_modelforge_app_nativebridge_NativeBridge_nativeGenerateStream(
+    JNIEnv* env, jobject /*thiz*/, jlong handle, jintArray prompt,
+    jint max_new, jfloat temperature, jint top_k, jfloat top_p, jlong seed,
+    jobject listener) {
+    return generate_streaming(env, from_handle(handle), prompt, max_new,
+                              temperature, top_k, top_p, seed, listener);
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -307,6 +396,16 @@ Java_com_modelforge_app_nativebridge_NativeBridge_nativePackedGenerate(
     } catch (...) {
         return nullptr;
     }
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_modelforge_app_nativebridge_NativeBridge_nativePackedGenerateStream(
+    JNIEnv* env, jobject /*thiz*/, jlong handle, jintArray prompt,
+    jint max_new, jfloat temperature, jint top_k, jfloat top_p, jlong seed,
+    jobject listener) {
+    auto* m = reinterpret_cast<PackedModel*>(static_cast<intptr_t>(handle));
+    return generate_streaming(env, m, prompt, max_new, temperature, top_k,
+                              top_p, seed, listener);
 }
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* /*vm*/, void* /*reserved*/) {

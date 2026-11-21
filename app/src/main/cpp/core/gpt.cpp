@@ -29,10 +29,31 @@ constexpr float kGeluK = 0.044715f;
 
 // Fixed sinusoidal positions. Unlike a learned table this costs no parameters
 // and no context-sized allocation, so long contexts only pay for activations.
-inline void add_positional(int pos, int d, float* x) {
+// Frequencies depend only on the model width, so they are computed once per
+// process instead of once per token. A 1024-token prefill used to make over a
+// quarter of a million pow() calls before any matrix was touched.
+const std::vector<double>& positional_frequencies(int d) {
+    static std::mutex table_mutex;
+    // A deque keeps references valid when another model width is registered
+    // while a forward pass is still reading the table.
+    static std::deque<std::pair<int, std::vector<double>>> table;
+    std::lock_guard<std::mutex> lock(table_mutex);
+    for (const auto& entry : table) {
+        if (entry.first == d) return entry.second;
+    }
+    std::vector<double> freq(static_cast<size_t>(d / 2));
     for (int p = 0; 2 * p < d; ++p) {
-        const double freq = std::pow(10000.0, -2.0 * static_cast<double>(p) /
-                                                  static_cast<double>(d));
+        freq[static_cast<size_t>(p)] =
+            std::pow(10000.0, -2.0 * static_cast<double>(p) / static_cast<double>(d));
+    }
+    table.emplace_back(d, std::move(freq));
+    return table.back().second;
+}
+
+inline void add_positional(int pos, int d, float* x) {
+    const std::vector<double>& frequencies = positional_frequencies(d);
+    for (int p = 0; 2 * p < d; ++p) {
+        const double freq = frequencies[static_cast<size_t>(p)];
         const double angle = static_cast<double>(pos) * freq;
         x[2 * p] += static_cast<float>(std::sin(angle));
         if (2 * p + 1 < d) x[2 * p + 1] += static_cast<float>(std::cos(angle));
@@ -244,6 +265,101 @@ void matmul_nt_raw(const Tensor& x, const float* w, int out, Tensor& y) {
     const int in = x.cols;
     if (n <= 0 || out <= 0 || in <= 0) return;
     y.ensure(n, out);
+#if defined(__aarch64__)
+    // 4x4 register tile. Sixteen independent accumulators keep the FMA pipes
+    // full, each x vector is reused for four output rows and each weight
+    // vector for four tokens, so the kernel does 16 FMAs per 8 vector loads.
+    // The previous dot-per-row version re-read every weight row for every
+    // token, which is why a step was memory-bound instead of compute-bound.
+    constexpr int kR = 4;
+    constexpr int kO = 4;
+    const int rTiles = (n + kR - 1) / kR;
+    const int oTiles = (out + kO - 1) / kO;
+    auto body = [&](int tile) {
+        const int ot = tile / rTiles;
+        const int rt = tile % rTiles;
+        const int o0 = ot * kO;
+        const int r0 = rt * kR;
+        const int nr = std::min(kR, n - r0);
+        const int no = std::min(kO, out - o0);
+        if (nr == kR && no == kO) {
+            float32x4_t acc[kR][kO];
+            for (int r = 0; r < kR; ++r) {
+                for (int o = 0; o < kO; ++o) acc[r][o] = vdupq_n_f32(0.0f);
+            }
+            int i = 0;
+            for (; i + 4 <= in; i += 4) {
+                float32x4_t xv[kR];
+                for (int r = 0; r < kR; ++r) xv[r] = vld1q_f32(x.row(r0 + r) + i);
+                for (int o = 0; o < kO; ++o) {
+                    const float32x4_t wv = vld1q_f32(w + static_cast<size_t>(o0 + o) * in + i);
+                    for (int r = 0; r < kR; ++r) {
+                        acc[r][o] = vfmaq_f32(acc[r][o], xv[r], wv);
+                    }
+                }
+            }
+            float sums[kR][kO];
+            for (int r = 0; r < kR; ++r) {
+                for (int o = 0; o < kO; ++o) sums[r][o] = vaddvq_f32(acc[r][o]);
+            }
+            for (; i < in; ++i) {
+                for (int r = 0; r < kR; ++r) {
+                    const float xv = x.row(r0 + r)[i];
+                    for (int o = 0; o < kO; ++o) {
+                        sums[r][o] += xv * w[static_cast<size_t>(o0 + o) * in + i];
+                    }
+                }
+            }
+            for (int r = 0; r < kR; ++r) {
+                for (int o = 0; o < kO; ++o) y.row(r0 + r)[o0 + o] = sums[r][o];
+            }
+            return;
+        }
+        for (int o = 0; o < no; ++o) {
+            const float* wr = w + static_cast<size_t>(o0 + o) * in;
+            for (int r = 0; r < nr; ++r) {
+                y.row(r0 + r)[o0 + o] = dot_f32(x.row(r0 + r), wr, in);
+            }
+        }
+    };
+    const int64_t work = static_cast<int64_t>(n) * out * in;
+    const int tiles = rTiles * oTiles;
+    // Measured on ARM64: the register tile wins once there is enough work to
+    // amortise its setup, and loses to the simpler dot-product tiling on small
+    // matrices. Keep both instead of paying for the wrong one.
+    if (n >= 8 && work >= 8000000) {
+        if (work < 300000) {
+            for (int t = 0; t < tiles; ++t) body(t);
+        } else {
+            parallel_for_any(tiles, body);
+        }
+        return;
+    }
+    constexpr int kOutTile = 8;
+    constexpr int kRowTile = 16;
+    const int outTiles = (out + kOutTile - 1) / kOutTile;
+    const int rowTiles = (n + kRowTile - 1) / kRowTile;
+    auto small = [&](int tile) {
+        const int ob = tile / rowTiles;
+        const int rb = tile % rowTiles;
+        const int o0 = ob * kOutTile;
+        const int o1 = std::min(out, o0 + kOutTile);
+        const int r0 = rb * kRowTile;
+        const int r1 = std::min(n, r0 + kRowTile);
+        for (int o = o0; o < o1; ++o) {
+            const float* wr = w + static_cast<size_t>(o) * in;
+            for (int r = r0; r < r1; ++r) {
+                y.row(r)[o] = dot_f32(x.row(r), wr, in);
+            }
+        }
+    };
+    const int smallTiles = outTiles * rowTiles;
+    if (work < 300000) {
+        for (int t = 0; t < smallTiles; ++t) small(t);
+    } else {
+        parallel_for_any(smallTiles, small);
+    }
+#else
     constexpr int kOutTile = 8;
     constexpr int kRowTile = 16;
     const int outTiles = (out + kOutTile - 1) / kOutTile;
@@ -269,6 +385,7 @@ void matmul_nt_raw(const Tensor& x, const float* w, int out, Tensor& y) {
     } else {
         parallel_for_any(tiles, body);
     }
+#endif
 }
 
 void add_bias(Tensor& y, const float* bias) {
@@ -681,6 +798,121 @@ void fake_quant_into(const Param& src, Tensor& dst, int bits, int group) {
 const float* lin_w(const Linear& lin) {
     if (lin.qat_bits > 0 && !lin.fake_weight.d.empty()) return lin.fake_weight.data();
     return lin.weight.data();
+}
+
+// y = x @ W^T for a single token. Identical arithmetic to matmul_nt_raw with
+// n == 1, but the output tiles are worth spreading across cores even for
+// small matrices: decode is the hot path and it is memory-bound, not
+// latency-bound like a training tile.
+void matmul_row(const Tensor& x, const float* w, int out, Tensor& y) {
+    const int in = x.cols;
+    if (x.rows != 1 || in <= 0 || out <= 0) return;
+    y.ensure(1, out);
+    constexpr int kTile = 8;
+    const int tiles = (out + kTile - 1) / kTile;
+    auto body = [&](int tile) {
+        const int o0 = tile * kTile;
+        const int o1 = std::min(out, o0 + kTile);
+        for (int o = o0; o < o1; ++o) {
+            y.row(0)[o] = dot_f32(x.row(0), w + static_cast<size_t>(o) * in, in);
+        }
+    };
+    if (static_cast<int64_t>(out) * in >= 200000) {
+        parallel_for_any(tiles, body);
+    } else {
+        for (int t = 0; t < tiles; ++t) body(t);
+    }
+}
+
+// One causal query against a cached prefix. This is the last row of
+// attention_forward with T = length, so cached and recomputed decoding agree.
+void attention_one(const ModelConfig& cfg, const float* q, const Tensor& keys,
+                   const Tensor& values, int length, float* out) {
+    const int H = cfg.heads;
+    const int hd = cfg.head_dim();
+    const float inv_sqrt_hd = 1.0f / std::sqrt(static_cast<float>(hd));
+    std::vector<float> probs(static_cast<size_t>(length));
+    for (int h = 0; h < H; ++h) {
+        const float* qh = q + h * hd;
+        float maxv = -1e30f;
+        for (int s = 0; s < length; ++s) {
+            const float sc = dot_f32(qh, keys.row(s) + h * hd, hd) * inv_sqrt_hd;
+            probs[static_cast<size_t>(s)] = sc;
+            if (sc > maxv) maxv = sc;
+        }
+        float sum = 0.0f;
+        for (int s = 0; s < length; ++s) {
+            const float e = std::exp(probs[static_cast<size_t>(s)] - maxv);
+            probs[static_cast<size_t>(s)] = e;
+            sum += e;
+        }
+        const float invsum = 1.0f / sum;
+        float* oh = out + h * hd;
+        for (int j = 0; j < hd; ++j) oh[j] = 0.0f;
+        for (int s = 0; s < length; ++s) {
+            const float p = probs[static_cast<size_t>(s)] * invsum;
+            const float* v = values.row(s) + h * hd;
+            for (int j = 0; j < hd; ++j) oh[j] += p * v[j];
+        }
+    }
+}
+
+// Shared by GPT and PackedModel so both decoding paths sample identically.
+int sample_token(const float* logits, int V, float temperature, int top_k,
+                 float top_p, std::mt19937_64& rng) {
+    if (temperature <= 0.0f) {
+        return static_cast<int>(std::max_element(logits, logits + V) - logits);
+    }
+    std::vector<int> idx(V);
+    for (int i = 0; i < V; ++i) idx[i] = i;
+    std::vector<float> scaled(V);
+    for (int i = 0; i < V; ++i) scaled[i] = logits[i] / std::max(1e-5f, temperature);
+
+    int keep = V;
+    if (top_k > 0 && top_k < V) {
+        keep = top_k;
+        std::partial_sort(idx.begin(), idx.begin() + keep, idx.end(),
+                          [&](int a, int b) { return scaled[a] > scaled[b]; });
+    } else {
+        std::sort(idx.begin(), idx.end(),
+                  [&](int a, int b) { return scaled[a] > scaled[b]; });
+    }
+
+    std::vector<float> probs(keep);
+    float mx = -1e30f;
+    for (int i = 0; i < keep; ++i) mx = std::max(mx, scaled[idx[i]]);
+    float sum = 0.0f;
+    for (int i = 0; i < keep; ++i) {
+        probs[i] = std::exp(scaled[idx[i]] - mx);
+        sum += probs[i];
+    }
+    for (int i = 0; i < keep; ++i) probs[i] /= sum;
+
+    int cutoff = keep;
+    if (top_p > 0.0f && top_p < 1.0f) {
+        float cumulative = 0.0f;
+        for (int i = 0; i < keep; ++i) {
+            cumulative += probs[i];
+            if (cumulative >= top_p) {
+                cutoff = i + 1;
+                break;
+            }
+        }
+    }
+    float renorm = 0.0f;
+    for (int i = 0; i < cutoff; ++i) renorm += probs[i];
+    std::uniform_real_distribution<float> uni(0.0f, renorm);
+    const float target = uni(rng);
+    float acc = 0.0f;
+    int next = idx[cutoff - 1];
+    for (int i = 0; i < cutoff; ++i) {
+        acc += probs[i];
+        if (target <= acc) {
+            next = idx[i];
+            break;
+        }
+    }
+    return next;
 }
 
 } // namespace
@@ -1171,9 +1403,95 @@ float GPT::train_step(const int* tokens, const int* targets, int B, int T,
     return loss;
 }
 
+void GPT::prefill_kv(const int* tokens, int T, KvCache& kv) {
+    kv.reset(cfg_.layers, cfg_.context, cfg_.d_model);
+    if (tokens == nullptr || T <= 0) return;
+    forward(tokens, nullptr, 1, T);
+    if (aborted_ || stop_requested() ||
+        static_cast<int>(cache_.layers.size()) != cfg_.layers) {
+        kv.length = 0;
+        return;
+    }
+    const size_t row_bytes = static_cast<size_t>(cfg_.d_model) * sizeof(float);
+    for (int l = 0; l < cfg_.layers; ++l) {
+        const LayerCache& lc = cache_.layers[static_cast<size_t>(l)];
+        if (lc.k.rows < T || lc.v.rows < T) {
+            kv.length = 0;
+            return;
+        }
+        for (int t = 0; t < T; ++t) {
+            std::memcpy(kv.keys[static_cast<size_t>(l)].row(t), lc.k.row(t), row_bytes);
+            std::memcpy(kv.values[static_cast<size_t>(l)].row(t), lc.v.row(t), row_bytes);
+        }
+    }
+    kv.length = T;
+}
+
+const float* GPT::decode_kv(int token, KvCache& kv) {
+    const int d = cfg_.d_model;
+    const int V = cfg_.vocab;
+    const int df = cfg_.d_ff;
+    if (token < 0 || token >= V || kv.length <= 0 || kv.length >= cfg_.context ||
+        static_cast<int>(kv.keys.size()) != cfg_.layers) {
+        return nullptr;
+    }
+    const int pos = kv.length;
+    const size_t row_bytes = static_cast<size_t>(d) * sizeof(float);
+
+    Tensor x(1, d);
+    const float* te = wte_.row(token);
+    for (int j = 0; j < d; ++j) x.row(0)[j] = te[j];
+    add_positional(pos, d, x.row(0));
+
+    Tensor ln(1, d);
+    Tensor inv(1, 1);
+    for (int l = 0; l < cfg_.layers; ++l) {
+        Layer& layer = layers_[static_cast<size_t>(l)];
+        layernorm_forward(x, layer.ln1.gamma.w.data(), layer.ln1.beta.w.data(),
+                          ln, inv, kLnEps);
+
+        Tensor q(1, d), k(1, d), v(1, d);
+        matmul_row(ln, lin_w(layer.wq), d, q);
+        add_bias(q, layer.wq.bias.w.data());
+        matmul_row(ln, lin_w(layer.wk), d, k);
+        add_bias(k, layer.wk.bias.w.data());
+        matmul_row(ln, lin_w(layer.wv), d, v);
+        add_bias(v, layer.wv.bias.w.data());
+
+        std::memcpy(kv.keys[static_cast<size_t>(l)].row(pos), k.row(0), row_bytes);
+        std::memcpy(kv.values[static_cast<size_t>(l)].row(pos), v.row(0), row_bytes);
+
+        Tensor attn(1, d);
+        attention_one(cfg_, q.row(0), kv.keys[static_cast<size_t>(l)],
+                      kv.values[static_cast<size_t>(l)], pos + 1, attn.row(0));
+
+        Tensor proj(1, d);
+        matmul_row(attn, lin_w(layer.wo), d, proj);
+        add_bias(proj, layer.wo.bias.w.data());
+
+        Tensor xmid(1, d);
+        for (int j = 0; j < d; ++j) xmid.row(0)[j] = x.row(0)[j] + proj.row(0)[j];
+
+        layernorm_forward(xmid, layer.ln2.gamma.w.data(), layer.ln2.beta.w.data(),
+                          ln, inv, kLnEps);
+        Tensor h1pre(1, df), h1(1, df), h2(1, d);
+        matmul_row(ln, lin_w(layer.w1), df, h1pre);
+        add_bias(h1pre, layer.w1.bias.w.data());
+        gelu_forward(h1pre, h1);
+        matmul_row(h1, lin_w(layer.w2), d, h2);
+        add_bias(h2, layer.w2.bias.w.data());
+        for (int j = 0; j < d; ++j) x.row(0)[j] = xmid.row(0)[j] + h2.row(0)[j];
+    }
+
+    layernorm_forward(x, lnf_g_.w.data(), lnf_b_.w.data(), cache_.lnf, cache_.invf, kLnEps);
+    matmul_row(cache_.lnf, wte_.data(), V, cache_.logits);
+    kv.length = pos + 1;
+    return cache_.logits.row(0);
+}
+
 std::vector<int> GPT::generate(const std::vector<int>& prompt, int max_new,
                                float temperature, int top_k, float top_p,
-                               uint64_t seed) {
+                               uint64_t seed, TokenCallback on_token) {
     std::vector<int> seq = prompt;
     if (seq.empty()) seq.push_back(0);
     if (max_new <= 0) return {};
@@ -1182,69 +1500,41 @@ std::vector<int> GPT::generate(const std::vector<int>& prompt, int max_new,
     std::vector<int> generated;
     generated.reserve(max_new);
 
-    for (int step = 0; step < max_new; ++step) {
+    KvCache kv;
+    const float* logits = nullptr;
+
+    // One full-prefix pass, then single-token steps. When the context window
+    // fills, the retained suffix is re-prefilled exactly as the old full
+    // recompute did, so positions and numerics stay identical.
+    auto refill = [&]() -> bool {
         const int start = std::max(0, static_cast<int>(seq.size()) - cfg_.context);
         const int T = static_cast<int>(seq.size()) - start;
-        forward(seq.data() + start, nullptr, 1, T);
-        const float* logits = cache_.logits.row(T - 1);
+        prefill_kv(seq.data() + start, T, kv);
+        if (kv.length != T) return false;
+        logits = cache_.logits.row(T - 1);
+        return true;
+    };
 
-        int next = 0;
-        if (temperature <= 0.0f) {
-            next = static_cast<int>(std::max_element(logits, logits + V) - logits);
-        } else {
-            std::vector<int> idx(V);
-            for (int i = 0; i < V; ++i) idx[i] = i;
-            std::vector<float> scaled(V);
-            for (int i = 0; i < V; ++i) scaled[i] = logits[i] / std::max(1e-5f, temperature);
+    if (!refill()) {
+        kv.release();
+        return generated;
+    }
 
-            int keep = V;
-            if (top_k > 0 && top_k < V) {
-                keep = top_k;
-                std::partial_sort(idx.begin(), idx.begin() + keep, idx.end(),
-                                  [&](int a, int b) { return scaled[a] > scaled[b]; });
-            } else {
-                std::sort(idx.begin(), idx.end(),
-                          [&](int a, int b) { return scaled[a] > scaled[b]; });
-            }
-
-            std::vector<float> probs(keep);
-            float mx = -1e30f;
-            for (int i = 0; i < keep; ++i) mx = std::max(mx, scaled[idx[i]]);
-            float sum = 0.0f;
-            for (int i = 0; i < keep; ++i) {
-                probs[i] = std::exp(scaled[idx[i]] - mx);
-                sum += probs[i];
-            }
-            for (int i = 0; i < keep; ++i) probs[i] /= sum;
-
-            int cutoff = keep;
-            if (top_p > 0.0f && top_p < 1.0f) {
-                float cumulative = 0.0f;
-                for (int i = 0; i < keep; ++i) {
-                    cumulative += probs[i];
-                    if (cumulative >= top_p) {
-                        cutoff = i + 1;
-                        break;
-                    }
-                }
-            }
-            float renorm = 0.0f;
-            for (int i = 0; i < cutoff; ++i) renorm += probs[i];
-            std::uniform_real_distribution<float> uni(0.0f, renorm);
-            const float target = uni(rng);
-            float acc = 0.0f;
-            next = idx[cutoff - 1];
-            for (int i = 0; i < cutoff; ++i) {
-                acc += probs[i];
-                if (target <= acc) {
-                    next = idx[i];
-                    break;
-                }
-            }
-        }
+    for (int step = 0; step < max_new; ++step) {
+        const int next = sample_token(logits, V, temperature, top_k, top_p, rng);
         seq.push_back(next);
         generated.push_back(next);
+        if (on_token && !on_token(next)) break;
+        if (step + 1 >= max_new) break;
+
+        if (kv.length >= cfg_.context) {
+            if (!refill()) break;
+        } else {
+            logits = decode_kv(next, kv);
+            if (logits == nullptr) break;
+        }
     }
+    kv.release();
     return generated;
 }
 
@@ -2291,9 +2581,85 @@ void PackedModel::forward(const int* tokens, int B, int T) const {
     matmul_nt_raw(cache_.lnf, wte_.data(), V, cache_.logits);
 }
 
+void PackedModel::prefill_kv(const int* tokens, int T, KvCache& kv) const {
+    kv.reset(cfg_.layers, cfg_.context, cfg_.d_model);
+    if (tokens == nullptr || T <= 0) return;
+    forward(tokens, 1, T);
+    if (static_cast<int>(cache_.layers.size()) != cfg_.layers ||
+        cache_.logits.rows != T) {
+        kv.length = 0;
+        return;
+    }
+    const size_t row_bytes = static_cast<size_t>(cfg_.d_model) * sizeof(float);
+    for (int l = 0; l < cfg_.layers; ++l) {
+        const LayerCache& lc = cache_.layers[static_cast<size_t>(l)];
+        if (lc.k.rows < T || lc.v.rows < T) {
+            kv.length = 0;
+            return;
+        }
+        for (int t = 0; t < T; ++t) {
+            std::memcpy(kv.keys[static_cast<size_t>(l)].row(t), lc.k.row(t), row_bytes);
+            std::memcpy(kv.values[static_cast<size_t>(l)].row(t), lc.v.row(t), row_bytes);
+        }
+    }
+    kv.length = T;
+}
+
+const float* PackedModel::decode_kv(int token, KvCache& kv) const {
+    const int d = cfg_.d_model;
+    const int V = cfg_.vocab;
+    const int df = cfg_.d_ff;
+    if (token < 0 || token >= V || kv.length <= 0 || kv.length >= cfg_.context ||
+        static_cast<int>(kv.keys.size()) != cfg_.layers) {
+        return nullptr;
+    }
+    const int pos = kv.length;
+    const size_t row_bytes = static_cast<size_t>(d) * sizeof(float);
+
+    Tensor x(1, d);
+    const float* te = wte_.row(token);
+    for (int j = 0; j < d; ++j) x.row(0)[j] = te[j];
+    add_positional(pos, d, x.row(0));
+
+    Tensor ln(1, d);
+    Tensor inv(1, 1);
+    for (int l = 0; l < cfg_.layers; ++l) {
+        const PackedLayer& layer = layers_[static_cast<size_t>(l)];
+        layernorm_forward(x, layer.ln1_gamma.data(), layer.ln1_beta.data(), ln, inv, kLnEps);
+
+        Tensor q(1, d), k(1, d), v(1, d);
+        matmul_packed(ln, layer.wq, q);
+        matmul_packed(ln, layer.wk, k);
+        matmul_packed(ln, layer.wv, v);
+        std::memcpy(kv.keys[static_cast<size_t>(l)].row(pos), k.row(0), row_bytes);
+        std::memcpy(kv.values[static_cast<size_t>(l)].row(pos), v.row(0), row_bytes);
+
+        Tensor attn(1, d);
+        attention_one(cfg_, q.row(0), kv.keys[static_cast<size_t>(l)],
+                      kv.values[static_cast<size_t>(l)], pos + 1, attn.row(0));
+
+        Tensor proj(1, d);
+        matmul_packed(attn, layer.wo, proj);
+        Tensor xmid(1, d);
+        for (int j = 0; j < d; ++j) xmid.row(0)[j] = x.row(0)[j] + proj.row(0)[j];
+
+        layernorm_forward(xmid, layer.ln2_gamma.data(), layer.ln2_beta.data(), ln, inv, kLnEps);
+        Tensor h1pre(1, df), h1(1, df), h2(1, d);
+        matmul_packed(ln, layer.w1, h1pre);
+        gelu_forward(h1pre, h1);
+        matmul_packed(h1, layer.w2, h2);
+        for (int j = 0; j < d; ++j) x.row(0)[j] = xmid.row(0)[j] + h2.row(0)[j];
+    }
+
+    layernorm_forward(x, lnf_g_.data(), lnf_b_.data(), cache_.lnf, cache_.invf, kLnEps);
+    matmul_row(cache_.lnf, wte_.data(), V, cache_.logits);
+    kv.length = pos + 1;
+    return cache_.logits.row(0);
+}
+
 std::vector<int> PackedModel::generate(const std::vector<int>& prompt, int max_new,
                                        float temperature, int top_k, float top_p,
-                                       uint64_t seed) const {
+                                       uint64_t seed, TokenCallback on_token) const {
     std::vector<int> seq = prompt;
     if (seq.empty()) seq.push_back(0);
     if (max_new <= 0) return {};
@@ -2302,69 +2668,38 @@ std::vector<int> PackedModel::generate(const std::vector<int>& prompt, int max_n
     std::vector<int> generated;
     generated.reserve(max_new);
 
-    for (int step = 0; step < max_new; ++step) {
+    KvCache kv;
+    const float* logits = nullptr;
+
+    auto refill = [&]() -> bool {
         const int start = std::max(0, static_cast<int>(seq.size()) - cfg_.context);
         const int T = static_cast<int>(seq.size()) - start;
-        forward(seq.data() + start, 1, T);
-        const float* logits = cache_.logits.row(T - 1);
+        prefill_kv(seq.data() + start, T, kv);
+        if (kv.length != T) return false;
+        logits = cache_.logits.row(T - 1);
+        return true;
+    };
 
-        int next = 0;
-        if (temperature <= 0.0f) {
-            next = static_cast<int>(std::max_element(logits, logits + V) - logits);
-        } else {
-            std::vector<int> idx(V);
-            for (int i = 0; i < V; ++i) idx[i] = i;
-            std::vector<float> scaled(V);
-            for (int i = 0; i < V; ++i) scaled[i] = logits[i] / std::max(1e-5f, temperature);
+    if (!refill()) {
+        kv.release();
+        return generated;
+    }
 
-            int keep = V;
-            if (top_k > 0 && top_k < V) {
-                keep = top_k;
-                std::partial_sort(idx.begin(), idx.begin() + keep, idx.end(),
-                                  [&](int a, int b) { return scaled[a] > scaled[b]; });
-            } else {
-                std::sort(idx.begin(), idx.end(),
-                          [&](int a, int b) { return scaled[a] > scaled[b]; });
-            }
-
-            std::vector<float> probs(keep);
-            float mx = -1e30f;
-            for (int i = 0; i < keep; ++i) mx = std::max(mx, scaled[idx[i]]);
-            float sum = 0.0f;
-            for (int i = 0; i < keep; ++i) {
-                probs[i] = std::exp(scaled[idx[i]] - mx);
-                sum += probs[i];
-            }
-            for (int i = 0; i < keep; ++i) probs[i] /= sum;
-
-            int cutoff = keep;
-            if (top_p > 0.0f && top_p < 1.0f) {
-                float cumulative = 0.0f;
-                for (int i = 0; i < keep; ++i) {
-                    cumulative += probs[i];
-                    if (cumulative >= top_p) {
-                        cutoff = i + 1;
-                        break;
-                    }
-                }
-            }
-            float renorm = 0.0f;
-            for (int i = 0; i < cutoff; ++i) renorm += probs[i];
-            std::uniform_real_distribution<float> uni(0.0f, renorm);
-            const float target = uni(rng);
-            float acc = 0.0f;
-            next = idx[cutoff - 1];
-            for (int i = 0; i < cutoff; ++i) {
-                acc += probs[i];
-                if (target <= acc) {
-                    next = idx[i];
-                    break;
-                }
-            }
-        }
+    for (int step = 0; step < max_new; ++step) {
+        const int next = sample_token(logits, V, temperature, top_k, top_p, rng);
         seq.push_back(next);
         generated.push_back(next);
+        if (on_token && !on_token(next)) break;
+        if (step + 1 >= max_new) break;
+
+        if (kv.length >= cfg_.context) {
+            if (!refill()) break;
+        } else {
+            logits = decode_kv(next, kv);
+            if (logits == nullptr) break;
+        }
     }
+    kv.release();
     return generated;
 }
 

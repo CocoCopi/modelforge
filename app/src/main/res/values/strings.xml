@@ -3,4 +3,6 @@
     <string name="app_name">ModelForge</string>
     <string name="training_channel_name">Model training</string>
     <string name="training_channel_description">Runs model training in the background</string>
+    <string name="read_models_permission_label">Read ModelForge models</string>
+    <string name="read_models_permission_description">Allows an evaluation app to read your models and tokenizers.</string>
 </resources>

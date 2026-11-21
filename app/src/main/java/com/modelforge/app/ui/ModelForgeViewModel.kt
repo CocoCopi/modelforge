@@ -61,6 +61,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 
@@ -117,11 +118,15 @@ data class WizardState(
     val datasetProgress: DownloadStats? = null,
     val datasetNotice: String? = null,
     val datasets: List<DatasetMixEntry> = emptyList(),
+    val parentId: String = "",
+    val seriesId: String = "",
+    val seriesVersion: Int = 1,
+    val preparing: Boolean = false,
     val error: String? = null
 ) {
     val canStart: Boolean
         get() = modelId != null && config != null && name.isNotBlank() &&
-            creator.isNotBlank() && datasets.isNotEmpty() &&
+            creator.isNotBlank() && datasets.isNotEmpty() && !preparing &&
             ArchitectureRegistry.info(architectureId).trainable &&
             inputModalities == setOf(Modality.TEXT) &&
             outputModalities == setOf(Modality.TEXT)
@@ -160,6 +165,8 @@ data class PlaygroundState(
     val tokensPerSec: Double = 0.0,
     val latencyMs: Long = 0L,
     val generatedTokens: Int = 0,
+    val trainingContention: Boolean = false,
+    val cancelled: Boolean = false,
     val exportedBytes: Long = 0L,
     val lastExportFile: String = "",
     val error: String? = null
@@ -369,6 +376,9 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
     fun manifest(id: String): ModelManifest? = store.loadManifest(id)
 
     fun liveState(id: String): TrainingLiveState? = store.loadLiveState(id)
+
+    @Volatile
+    private var playgroundCancel = false
 
     fun checkpointMegabytes(id: String): Pair<Long, Long> {
         // Round up: a valid checkpoint smaller than 1 MB must not read as 0
@@ -1440,7 +1450,7 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             ),
             settings = settings,
             datasets = state.datasets,
-            tokenizerTrained = false,
+            tokenizerTrained = state.parentId.isNotBlank(),
             languages = state.languages.toList(),
             behavior = com.modelforge.app.data.BehaviorConfig(
                 speedMode = state.speedMode,
@@ -1448,13 +1458,50 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 reasoningRoom = state.reasoningRoom,
                 toolCalling = state.toolCalling,
                 persona = state.persona.trim()
-            )
+            ),
+            seriesId = state.seriesId.ifBlank { id },
+            seriesVersion = state.seriesVersion,
+            parentId = state.parentId
         )
         store.saveManifest(manifest)
+        val parentId = state.parentId
+        if (parentId.isNotBlank()) {
+            updateWizard {
+                it.copy(
+                    preparing = true,
+                    error = null,
+                    datasetNotice = "Copying weights and tokenizer from the previous version…"
+                )
+            }
+            viewModelScope.launch(Dispatchers.IO) {
+                val seeded = runCatching { seedFromParent(parentId, id) }.getOrDefault(false)
+                if (!seeded) {
+                    updateWizard {
+                        it.copy(
+                            preparing = false,
+                            datasetNotice = null,
+                            error = "No readable checkpoint was found in the previous version. " +
+                                "Train that version first, or start a model from scratch."
+                        )
+                    }
+                    return@launch
+                }
+                launchTraining(id)
+            }
+            return
+        }
+        launchTraining(id)
+    }
+
+    private fun launchTraining(id: String) {
         runCatching { TrainingService.start(getApplication(), id) }
             .onFailure { t ->
                 updateWizard {
-                    it.copy(error = t.message ?: "Could not start the training service.")
+                    it.copy(
+                        preparing = false,
+                        datasetNotice = null,
+                        error = t.message ?: "Could not start the training service."
+                    )
                 }
                 return
             }
@@ -1465,15 +1512,237 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         _screen.value = Screen.Training(id)
     }
 
+    /**
+     * Copies the parent's best weights and tokenizer into the new version.
+     * Training reads them once, then writes its own checkpoints, so the parent
+     * stays reproducible and can still be evaluated side by side.
+     */
+    private fun seedFromParent(parentId: String, id: String): Boolean {
+        val source = listOf(
+            store.bestCheckpoint(parentId),
+            store.lastCheckpoint(parentId),
+            store.recoveryCheckpoint(parentId)
+        ).firstOrNull { CheckpointHeader.hasMagic(it) } ?: return false
+        source.copyTo(store.initCheckpoint(id), overwrite = true)
+        val tokenizer = store.tokenizerFile(parentId)
+        if (tokenizer.exists()) {
+            tokenizer.copyTo(store.tokenizerFile(id), overwrite = true)
+        }
+        return true
+    }
+
+    /**
+     * Starts the next version in a series. The wizard is pre-filled with the
+     * parent's architecture, datasets and behaviour, so the user only changes
+     * what this version should improve: extra datasets, more steps, a new name.
+     */
+    fun startNextVersion(parentId: String) {
+        val parent = store.loadManifest(parentId) ?: return
+        val version = parent.seriesVersion + 1
+        val baseName = parent.name.replace(Regex("\\s+v\\d+$"), "")
+        val name = "$baseName v$version"
+        val id = store.newModelId(name)
+        _wizard.value = WizardState(
+            modelId = id,
+            name = name,
+            creator = parent.creator,
+            architectureId = parent.config.architectureId,
+            targetParams = parent.config.paramCount(),
+            inputModalities = setOf(Modality.TEXT),
+            outputModalities = setOf(Modality.TEXT),
+            languages = parent.languages.toSet().ifEmpty { setOf("English") },
+            speedMode = parent.behavior.speedMode,
+            reasoningEnabled = parent.behavior.reasoningEnabled,
+            reasoningRoom = parent.behavior.reasoningRoom,
+            toolCalling = parent.behavior.toolCalling,
+            persona = parent.behavior.persona,
+            config = parent.config,
+            bits = if (parent.config.bits in 2..8) parent.config.bits else 4,
+            steps = parent.settings.steps,
+            batchSize = parent.settings.batchSize,
+            seqLength = parent.settings.seqLength,
+            learningRate = parent.settings.learningRate / 2f,
+            warmupSteps = parent.settings.warmupSteps,
+            checkpointEvery = parent.settings.checkpointEvery,
+            sampleEvery = parent.settings.sampleEvery,
+            corpusChars = parent.settings.corpusChars,
+            datasets = parent.datasets,
+            parentId = parent.id,
+            seriesId = parent.lineageId,
+            seriesVersion = version
+        )
+        _screen.value = Screen.Wizard
+    }
+
+    /** All versions of one lineage, oldest first, for the series view. */
+    fun seriesFor(modelId: String): List<ModelManifest> {
+        val current = store.loadManifest(modelId) ?: return emptyList()
+        return store.listManifests()
+            .filter { it.lineageId == current.lineageId }
+            .sortedBy { it.seriesVersion }
+    }
+
     fun openModel(id: String) {
         _screen.value = Screen.ModelDetail(id)
         refreshModels()
     }
 
     fun openTraining(id: String) {
-        runCatching { TrainingService.start(getApplication(), id) }
+        // On a finished model this adds another run of the configured length
+        // instead of reporting that there is nothing left to do.
+        runCatching { TrainingService.start(getApplication(), id, extend = true) }
         _screen.value = Screen.Training(id)
         refreshModels()
+    }
+
+    /**
+     * Continues the same model for exactly [extraSteps] more optimizer steps,
+     * resuming weights and AdamW state from its latest checkpoint.
+     */
+    fun extendTraining(modelId: String, extraSteps: Int) {
+        val manifest = store.loadManifest(modelId) ?: return
+        val steps = extraSteps.coerceIn(10, 20000)
+        store.saveManifest(
+            manifest.copy(settings = manifest.settings.copy(steps = steps))
+        )
+        runCatching { TrainingService.start(getApplication(), modelId, extend = true) }
+        _screen.value = Screen.Training(modelId)
+        refreshModels()
+    }
+
+    /**
+     * Builds the free Colab package: token cache, config, tokenizer, optional
+     * starting weights and a generated notebook. Drive is used as the transfer
+     * folder; there is no hidden Colab automation and no stored credential.
+     */
+    fun exportCloudPackage(modelId: String, onResult: (File?, String?) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                val manifest = store.loadManifest(modelId)
+                    ?: throw IllegalStateException("This model no longer exists.")
+                val tokens = store.tokenCacheFile(modelId)
+                if (!tokens.isFile) {
+                    throw IllegalStateException(
+                        "No token cache yet. Start local training once so the corpus is " +
+                            "prepared, then export the cloud package."
+                    )
+                }
+                val dir = File(getApplication<Application>().cacheDir, "cloud").apply { mkdirs() }
+                val safeName = manifest.name.replace(Regex("[^A-Za-z0-9._-]+"), "-").take(40)
+                val zip = File(dir, "ModelForge-$safeName-colab.zip")
+                java.util.zip.ZipOutputStream(zip.outputStream().buffered()).use { out ->
+                    fun put(name: String, write: (java.io.OutputStream) -> Unit) {
+                        out.putNextEntry(java.util.zip.ZipEntry(name))
+                        write(out)
+                        out.closeEntry()
+                    }
+                    fun putFile(name: String, file: File) = put(name) { target ->
+                        file.inputStream().use { it.copyTo(target) }
+                    }
+                    fun putText(name: String, text: String) = put(name) { target ->
+                        target.write(text.toByteArray(Charsets.UTF_8))
+                    }
+                    putFile("input/tokens.bin", tokens)
+                    val configFile = store.configFile(modelId)
+                    if (configFile.isFile) {
+                        putFile("input/config.json", configFile)
+                    } else {
+                        val c = manifest.config
+                        putText(
+                            "input/config.json",
+                            """{"vocabSize": ${c.vocabSize}, "contextLength": ${c.contextLength}, """ +
+                                """"dModel": ${c.dModel}, "layers": ${c.layers}, """ +
+                                """"heads": ${c.heads}, "dFf": ${c.dFf}}"""
+                        )
+                    }
+                    val tokenizer = store.tokenizerFile(modelId)
+                    if (tokenizer.isFile) putFile("input/tokenizer.json", tokenizer)
+                    val best = store.bestCheckpoint(modelId)
+                    if (CheckpointHeader.hasMagic(best)) putFile("input/init.mfck", best)
+                    putText("ModelForge-$safeName.ipynb", com.modelforge.app.cloud.ColabNotebook.notebook(manifest))
+                    putText(
+                        "README.txt",
+                        "ModelForge cloud training package for ${manifest.name}\n" +
+                            "\n" +
+                            "1. Upload the contents of this zip to Google Drive: My Drive/ModelForge/${manifest.id}/\n" +
+                            "   so that input/tokens.bin and the .ipynb sit exactly there.\n" +
+                            "2. Open the .ipynb in Google Colab (CPU runtime is enough; the engine is CPU-only).\n" +
+                            "3. Run the cells. Progress and checkpoints are mirrored to output/ in the same folder.\n" +
+                            "4. In ModelForge, use Import cloud checkpoint and choose output/best.mfck.\n" +
+                            "\n" +
+                            "Colab sessions are managed by Google in your browser. The app does not log in to\n" +
+                            "your Google account and cannot start or stop a session for you.\n"
+                    )
+                }
+                zip
+            }
+            withContext(Dispatchers.Main) {
+                result.onSuccess { onResult(it, null) }
+                result.onFailure { onResult(null, it.message ?: "The cloud package could not be written.") }
+            }
+        }
+    }
+
+    /** Imports a Drive-downloaded .mfck as this model's best checkpoint. */
+    fun importCloudCheckpoint(modelId: String, uri: android.net.Uri, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val manifest = store.loadManifest(modelId)
+                    ?: throw IllegalStateException("This model no longer exists.")
+                val tmp = File(store.checkpointsDir(modelId), ".cloud-import.mfck")
+                getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
+                    tmp.outputStream().use { output -> input.copyTo(output) }
+                } ?: throw IllegalStateException("The selected file could not be opened.")
+                val config = CheckpointHeader.readConfig(tmp)
+                    ?: throw IllegalStateException("That is not a complete ModelForge .mfck checkpoint.")
+                val expected = manifest.config
+                val matches = config.vocabSize == expected.vocabSize &&
+                    config.contextLength == expected.contextLength &&
+                    config.dModel == expected.dModel && config.layers == expected.layers &&
+                    config.heads == expected.heads && config.dFf == expected.dFf &&
+                    config.tiedEmbeddings == expected.tiedEmbeddings
+                if (!matches) {
+                    tmp.delete()
+                    throw IllegalStateException(
+                        "The checkpoint architecture does not match ${manifest.name}. " +
+                            "Import it into the model it was trained for."
+                    )
+                }
+                tmp.copyTo(store.bestCheckpoint(modelId), overwrite = true)
+                tmp.delete()
+                withContext(Dispatchers.Main) {
+                    onResult(true, "Cloud checkpoint imported. Open the playground to test and export it.")
+                }
+            } catch (t: Throwable) {
+                withContext(Dispatchers.Main) {
+                    onResult(false, t.message ?: "The checkpoint could not be imported.")
+                }
+            }
+        }
+    }
+
+    /** Reads a Drive-downloaded progress.json written by the notebook. */
+    fun readCloudProgress(uri: android.net.Uri, onResult: (String) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val text = runCatching {
+                val raw = getApplication<Application>().contentResolver.openInputStream(uri)
+                    ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+                    ?: throw IllegalStateException("The selected file could not be opened.")
+                val json = org.json.JSONObject(raw)
+                val step = json.optInt("step")
+                val total = json.optInt("totalSteps")
+                val loss = json.optDouble("loss")
+                val best = json.optDouble("bestLoss")
+                val tps = json.optDouble("tokensPerSec")
+                val eta = json.optLong("etaSeconds")
+                val status = json.optString("status", "unknown")
+                "Cloud run: $status · step $step/$total · loss " +
+                    String.format("%.4f", loss) + " · best " + String.format("%.4f", best) +
+                    " · " + String.format("%.0f tok/s", tps) +
+                    if (eta > 0) " · ETA ${eta / 60} min" else ""
+            }.getOrElse { it.message ?: "progress.json could not be read." }
+            withContext(Dispatchers.Main) { onResult(text) }
+        }
     }
 
     fun isIgnoringBatteryOptimizations(): Boolean {
@@ -1693,8 +1962,24 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             }
             return
         }
+        // Generation and training share the same cores. Say so instead of
+        // letting a slow answer look like a hang.
+        val trainingActive = store.loadLiveState(id)?.isActive == true
         viewModelScope.launch(Dispatchers.Default) {
-            _playground.update { it.copy(busy = true, status = "Generating…", error = null) }
+            playgroundCancel = false
+            _playground.update {
+                it.copy(
+                    busy = true,
+                    status = "Loading model…",
+                    output = "",
+                    generatedTokens = 0,
+                    tokensPerSec = 0.0,
+                    latencyMs = 0L,
+                    trainingContention = trainingActive,
+                    cancelled = false,
+                    error = null
+                )
+            }
             try {
                 val tokenizer = BpeTokenizer.load(tokenizerFile)
                 val promptText = ResponseModes.prompt(
@@ -1705,26 +1990,53 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 val encoded = tokenizer.encode(promptText)
                 val prompt = if (encoded.isEmpty()) tokenizer.encode(" ") else encoded
                 val maxNew = ResponseModes.maxNewTokens(state.maxNew, state.speedMode)
-                var text = ""
-                var tokens = 0
-                var perSecond = 0.0
-                var latency = 0L
+                val streamed = ArrayList<Int>(maxNew)
+                var started = 0L
+                var lastUi = 0L
+
+                // Runs on the native thread. UI updates are throttled so text
+                // rendering never becomes the bottleneck; cancellation is read
+                // between tokens, which is what makes Stop immediate.
+                val onToken: (Int) -> Boolean = { token ->
+                    streamed.add(token)
+                    val now = System.nanoTime()
+                    if (streamed.size == 1 || now - lastUi > 120_000_000L) {
+                        lastUi = now
+                        val seconds = (now - started) / 1_000_000_000.0
+                        val perSecond = if (seconds > 0.0) streamed.size / seconds else 0.0
+                        val decoded = tokenizer.decode(streamed.toIntArray())
+                        _playground.update {
+                            it.copy(
+                                status = "${streamed.size}/$maxNew tokens · " +
+                                    String.format("%.1f tok/s", perSecond),
+                                output = decoded,
+                                generatedTokens = streamed.size,
+                                tokensPerSec = perSecond,
+                                latencyMs = (now - started) / 1_000_000L
+                            )
+                        }
+                    }
+                    !playgroundCancel
+                }
+
+                val generated: IntArray
+                val elapsed: Long
                 if (state.mode == PlaygroundState.MODE_PACKED) {
                     val model = PackedModel.load(packed.absolutePath)
                         ?: throw IllegalStateException("Could not load the packed file. Export it again.")
                     try {
                         val trimmed = prompt.takeLast((model.config.contextLength - 1).coerceAtLeast(1))
                             .toIntArray()
-                        val started = System.nanoTime()
-                        val generated = model.generate(
-                            trimmed, maxNew, state.temperature, state.topK, state.topP, System.nanoTime()
+                        _playground.update {
+                            it.copy(status = "Prefilling ${trimmed.size} prompt tokens…")
+                        }
+                        val t0 = System.nanoTime()
+                        started = t0
+                        generated = model.generateStreaming(
+                            trimmed, maxNew, state.temperature, state.topK, state.topP,
+                            System.nanoTime(), onToken
                         )
-                        val elapsed = System.nanoTime() - started
-                        val seconds = elapsed / 1_000_000_000.0
-                        text = tokenizer.decode(generated)
-                        tokens = generated.size
-                        perSecond = if (seconds > 0.0) generated.size / seconds else 0.0
-                        latency = elapsed / 1_000_000L
+                        elapsed = System.nanoTime() - t0
                     } finally {
                         model.close()
                     }
@@ -1734,28 +2046,38 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                     try {
                         val trimmed = prompt.takeLast((model.config.contextLength - 1).coerceAtLeast(1))
                             .toIntArray()
-                        val started = System.nanoTime()
-                        val generated = model.generate(
-                            trimmed, maxNew, state.temperature, state.topK, state.topP, System.nanoTime()
+                        _playground.update {
+                            it.copy(status = "Prefilling ${trimmed.size} prompt tokens…")
+                        }
+                        val t0 = System.nanoTime()
+                        started = t0
+                        generated = model.generateStreaming(
+                            trimmed, maxNew, state.temperature, state.topK, state.topP,
+                            System.nanoTime(), onToken
                         )
-                        val elapsed = System.nanoTime() - started
-                        val seconds = elapsed / 1_000_000_000.0
-                        text = tokenizer.decode(generated)
-                        tokens = generated.size
-                        perSecond = if (seconds > 0.0) generated.size / seconds else 0.0
-                        latency = elapsed / 1_000_000L
+                        elapsed = System.nanoTime() - t0
                     } finally {
                         model.close()
                     }
                 }
+
+                val seconds = elapsed / 1_000_000_000.0
+                val text = tokenizer.decode(generated)
+                val wasCancelled = playgroundCancel
                 _playground.update {
                     it.copy(
                         busy = false,
-                        status = "",
+                        status = if (wasCancelled) {
+                            "Stopped after ${generated.size} tokens"
+                        } else {
+                            "${generated.size} tokens in " +
+                                String.format("%.1f s", seconds)
+                        },
                         output = text,
-                        generatedTokens = tokens,
-                        tokensPerSec = perSecond,
-                        latencyMs = latency
+                        generatedTokens = generated.size,
+                        tokensPerSec = if (seconds > 0.0) generated.size / seconds else 0.0,
+                        latencyMs = elapsed / 1_000_000L,
+                        cancelled = wasCancelled
                     )
                 }
             } catch (t: Throwable) {
@@ -1768,6 +2090,13 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+    }
+
+    /** Stops the current generation between tokens and keeps the partial text. */
+    fun cancelPlayground() {
+        if (!_playground.value.busy) return
+        playgroundCancel = true
+        _playground.update { it.copy(status = "Stopping…") }
     }
 
     fun exportPacked() {

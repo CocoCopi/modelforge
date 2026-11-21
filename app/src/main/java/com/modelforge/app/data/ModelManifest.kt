@@ -90,8 +90,14 @@ data class ModelManifest(
     val datasets: List<DatasetMixEntry> = emptyList(),
     val tokenizerTrained: Boolean = false,
     val languages: List<String> = emptyList(),
-    val behavior: BehaviorConfig = BehaviorConfig()
-)
+    val behavior: BehaviorConfig = BehaviorConfig(),
+    /** Versions of one lineage share [seriesId]; [parentId] is the direct ancestor. */
+    val seriesId: String = "",
+    val seriesVersion: Int = 1,
+    val parentId: String = ""
+) {
+    val lineageId: String get() = seriesId.ifBlank { id }
+}
 
 @Serializable
 data class TrainingLiveState(

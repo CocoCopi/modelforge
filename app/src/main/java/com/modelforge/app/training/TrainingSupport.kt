@@ -261,6 +261,29 @@ object CheckpointHeader {
         }.getOrNull()
     }
 
+    /** Reads the architecture fields without loading any weights. */
+    fun readConfig(file: File): com.modelforge.app.core.ModelConfig? {
+        if (!hasMagic(file) || file.length() < STEP_OFFSET) return null
+        return runCatching {
+            RandomAccessFile(file, "r").use { input ->
+                val bytes = ByteArray(STEP_OFFSET.toInt())
+                input.readFully(bytes)
+                val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+                buffer.position(8)
+                val config = com.modelforge.app.core.ModelConfig(
+                    vocabSize = buffer.int,
+                    contextLength = buffer.int,
+                    dModel = buffer.int,
+                    layers = buffer.int,
+                    heads = buffer.int,
+                    dFf = buffer.int,
+                    tiedEmbeddings = buffer.int != 0
+                )
+                if (config.isValid()) config else null
+            }
+        }.getOrNull()
+    }
+
     fun hasMagic(file: File): Boolean {
         if (!file.exists() || file.length() < 4) return false
         return runCatching {
