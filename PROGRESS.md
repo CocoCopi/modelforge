@@ -1279,5 +1279,9 @@ Status: IN PROGRESS (tagged for CI release).
   generated Colab notebook that builds it and mirrors progress/checkpoints to
   Drive. Notebook JSON is validated by a JVM unit test; no credentials, no
   undocumented Colab endpoints.
-- Bench 1.0.0 was released from its own repository:
-  https://github.com/CocoCopi/ModelForge-Bench/releases/tag/v1.0.0
+- Bench 1.0.0 and 1.0.1 were released from their own repository:
+  https://github.com/CocoCopi/ModelForge-Bench/releases (1.0.1 adds the
+  read-only run provider used by the ModelForge series card).
+- Series intelligence: `BenchClient` reads Bench run summaries, the series card
+  shows per-version scores and deltas, and `seriesAdvice` explains which
+  measured weakness shaped the next version's steps, corpus and learning rate.

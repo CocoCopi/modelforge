@@ -39,7 +39,12 @@ Licence: Apache License 2.0 (see `LICENSE` and `NOTICE`).
   of extra steps you choose, resuming weights and AdamW state. "New version in
   this series" pre-fills the wizard from the parent, copies its best weights and
   tokenizer, and starts a fresh run at step 0 with any dataset mix, step count
-  and name, so v1 and v2 stay independently evaluable.
+  and name, so v1 and v2 stay independently evaluable. The series card reads
+  Bench run history and shows each version's composite score, accuracy,
+  perplexity, decode speed and the delta against its predecessor. The weakest
+  measured section decides the next version's budget: quality, calibration,
+  robustness or generation problems double the steps and corpus at half the
+  learning rate, and the card says which number caused that choice.
 - **Faster training kernels** - the forward projection uses a size-selective
   4x4 NEON register tile (16 independent accumulators, 16 FMAs per 8 vector
   loads) alongside the original dot-product tiling, and positional frequencies

@@ -1542,6 +1542,20 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
         val baseName = parent.name.replace(Regex("\\s+v\\d+$"), "")
         val name = "$baseName v$version"
         val id = store.newModelId(name)
+        val weakest = runCatching { bench.latestBySource()[parentId]?.weakestPart }.getOrNull()
+        val needsMoreTraining = weakest == null || weakest in setOf(
+            "Quality", "Calibration", "Robustness", "Generation"
+        )
+        val nextSteps = if (needsMoreTraining) {
+            (parent.settings.steps * 2).coerceAtMost(20000)
+        } else {
+            parent.settings.steps
+        }
+        val nextCorpus = if (needsMoreTraining) {
+            (parent.settings.corpusChars * 2).coerceAtMost(24_000_000)
+        } else {
+            parent.settings.corpusChars
+        }
         _wizard.value = WizardState(
             modelId = id,
             name = name,
@@ -1558,20 +1572,93 @@ class ModelForgeViewModel(app: Application) : AndroidViewModel(app) {
             persona = parent.behavior.persona,
             config = parent.config,
             bits = if (parent.config.bits in 2..8) parent.config.bits else 4,
-            steps = parent.settings.steps,
+            steps = nextSteps,
             batchSize = parent.settings.batchSize,
             seqLength = parent.settings.seqLength,
             learningRate = parent.settings.learningRate / 2f,
             warmupSteps = parent.settings.warmupSteps,
             checkpointEvery = parent.settings.checkpointEvery,
             sampleEvery = parent.settings.sampleEvery,
-            corpusChars = parent.settings.corpusChars,
+            corpusChars = nextCorpus,
             datasets = parent.datasets,
             parentId = parent.id,
             seriesId = parent.lineageId,
             seriesVersion = version
         )
         _screen.value = Screen.Wizard
+    }
+
+    data class SeriesEntry(
+        val manifest: ModelManifest,
+        val score: com.modelforge.app.data.bench.BenchClient.RunSummary?
+    )
+
+    private val bench by lazy { com.modelforge.app.data.bench.BenchClient(getApplication()) }
+
+    fun benchAvailability(): com.modelforge.app.data.bench.BenchClient.Availability =
+        bench.availability()
+
+    fun refreshBenchAvailability() = benchAvailability()
+
+    /** Every version of the series with its newest completed Bench score, if any. */
+    fun seriesWithScores(modelId: String): List<SeriesEntry> {
+        val scores = runCatching { bench.latestBySource() }.getOrDefault(emptyMap())
+        return seriesFor(modelId).map { entry ->
+            SeriesEntry(entry, scores[entry.id])
+        }
+    }
+
+    /**
+     * Turns measured weaknesses into concrete next-version advice. This is
+     * deliberately heuristic and transparent: the app shows which Bench number
+     * produced each suggestion instead of claiming an AI decided in secret.
+     */
+    fun seriesAdvice(modelId: String): List<String> {
+        val entries = seriesWithScores(modelId)
+        val current = entries.firstOrNull { it.manifest.id == modelId } ?: return emptyList()
+        val advice = ArrayList<String>()
+        val score = current.score
+        if (score == null) {
+            advice += "No completed Bench run for this version yet. Run one to get advice based on measurements."
+            return advice
+        }
+        advice += "Latest Bench: ${String.format("%.0f", score.composite)}/100 (${score.grade}) · ${score.verdict}."
+        val previous = entries
+            .filter { it.manifest.seriesVersion < current.manifest.seriesVersion }
+            .maxByOrNull { it.manifest.seriesVersion }
+        previous?.score?.let { before ->
+            val delta = score.composite - before.composite
+            advice += if (delta >= 0) {
+                "Up ${String.format("%.1f", delta)} points from v${previous.manifest.seriesVersion}."
+            } else {
+                "Down ${String.format("%.1f", -delta)} points from v${previous.manifest.seriesVersion}; " +
+                    "keep that version's checkpoint before training further."
+            }
+        }
+        when (score.weakestPart) {
+            "Quality" -> advice +=
+                "Quality is the weakest part (${String.format("%.0f", score.weakestScore)}/100). " +
+                "The next version starts with twice the steps and corpus, at half the learning rate."
+            "Calibration" -> advice +=
+                "Confidence is mis-calibrated. Train longer on a broader mix rather than " +
+                "repeating one dataset, so confident wrong answers become rarer."
+            "Robustness" -> advice +=
+                "Answers change when choices are reordered. Add more question/answer formats " +
+                "and avoid a single narrow dataset for the next run."
+            "Generation" -> advice +=
+                "Repetition is the weak point. Prefer longer, varied prose and remove duplicated rows."
+            "Efficiency" -> advice +=
+                "Decode speed is the weak point. Architecture stays fixed when seeding weights, " +
+                "so export 4-bit packed for speed, or start a smaller model from scratch."
+            "Memory" -> advice +=
+                "Peak memory is the weak point. Use a 4-bit export, or design a smaller architecture " +
+                "in a fresh model; seeded versions must keep the same shape."
+            "Cost" -> advice +=
+                "Cost per million tokens is high. Fewer parameters or a packed export improves it; " +
+                "the Bench cost settings should match your electricity price."
+            else -> advice += "No weak section stood out. A longer run on fresh data is the safest next step."
+        }
+        return advice
     }
 
     /** All versions of one lineage, oldest first, for the series view. */

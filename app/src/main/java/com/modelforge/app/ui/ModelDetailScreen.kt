@@ -326,9 +326,13 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
                 }
             }
 
-            val series = remember(modelId) { vm.seriesFor(modelId) }
+            val seriesEntries = remember(modelId) { vm.seriesWithScores(modelId) }
+            val seriesAdvice = remember(modelId) { vm.seriesAdvice(modelId) }
+            val benchPermission = rememberLauncherForActivityResult(
+                ActivityResultContracts.RequestPermission()
+            ) { }
             SectionCard("Series · version ${manifest.seriesVersion}") {
-                if (series.size <= 1) {
+                if (seriesEntries.size <= 1) {
                     Text(
                         "This is the first version. A new version starts from this model's " +
                             "best weights and tokenizer, then lets you add datasets and choose " +
@@ -336,14 +340,73 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
                         style = MaterialTheme.typography.bodySmall,
                         color = ForgeColors.inkMuted
                     )
-                } else {
-                    series.forEach { version ->
+                }
+                seriesEntries.forEach { entry ->
+                    val previous = seriesEntries
+                        .filter { it.manifest.seriesVersion < entry.manifest.seriesVersion }
+                        .maxByOrNull { it.manifest.seriesVersion }
+                    val delta = if (entry.score != null && previous?.score != null) {
+                        entry.score.composite - previous.score.composite
+                    } else {
+                        null
+                    }
+                    ForgeOutlineButton(
+                        "v${entry.manifest.seriesVersion} · ${entry.manifest.name}" +
+                            if (entry.manifest.id == modelId) " (this model)" else "",
+                        onClick = { vm.openModel(entry.manifest.id) },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = entry.manifest.id != modelId
+                    )
+                    Text(
+                        entry.score?.let { score ->
+                            "${String.format("%.0f", score.composite)}/100 · ${score.grade} · " +
+                                "MC ${String.format("%.0f%%", score.mcAccuracy * 100)} · " +
+                                "ppl ${String.format("%.2f", score.perplexity)} · " +
+                                "${String.format("%.1f tok/s", score.decodeTps)}"
+                        } ?: "No completed Bench run yet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (entry.score != null) ForgeColors.verdigris else ForgeColors.inkMuted
+                    )
+                    delta?.let { change ->
+                        Text(
+                            (if (change >= 0) "+" else "") + String.format("%.1f", change) +
+                                " points vs v${previous?.manifest?.seriesVersion}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (change >= 0) ForgeColors.verdigris else ForgeColors.ochreInk
+                        )
+                    }
+                }
+                when (vm.benchAvailability()) {
+                    com.modelforge.app.data.bench.BenchClient.Availability.NEEDS_PERMISSION ->
                         ForgeOutlineButton(
-                            "v${version.seriesVersion} · ${version.name}" +
-                                if (version.id == modelId) " (this model)" else "",
-                            onClick = { vm.openModel(version.id) },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = version.id != modelId
+                            "Allow Bench score access",
+                            onClick = {
+                                benchPermission.launch(
+                                    com.modelforge.app.data.bench.BenchClient.PERMISSION
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    com.modelforge.app.data.bench.BenchClient.Availability.NOT_INSTALLED ->
+                        Text(
+                            "Install ModelForge Bench 1.0.1+ to see measured scores here.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = ForgeColors.inkMuted
+                        )
+                    com.modelforge.app.data.bench.BenchClient.Availability.NOT_SUPPORTED ->
+                        Text(
+                            "Update ModelForge Bench to 1.0.1 or newer to share scores.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = ForgeColors.inkMuted
+                        )
+                    else -> {}
+                }
+                if (seriesAdvice.isNotEmpty()) {
+                    seriesAdvice.forEach { line ->
+                        Text(
+                            "• $line",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = ForgeColors.inkMuted
                         )
                     }
                 }
@@ -354,7 +417,8 @@ fun ModelDetailScreen(vm: ModelForgeViewModel, modelId: String) {
                     enabled = !active
                 )
                 Text(
-                    "Evaluate versions in ModelForge Bench to compare accuracy, speed and cost.",
+                    "The next version is pre-filled from Bench results: weak quality, calibration, " +
+                        "robustness or generation doubles the training budget at half the learning rate.",
                     style = MaterialTheme.typography.bodySmall,
                     color = ForgeColors.verdigris
                 )
